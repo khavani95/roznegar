@@ -1,0 +1,156 @@
+import ExcelJS from "exceljs";
+import type { DaySummary } from "./consolidate";
+import { humanDuration } from "./attendance-calc";
+import type { WorkDay, Project } from "@/db/schema";
+
+const HEADER_FILL = "FF1F4E78";
+const SUBHEAD_FILL = "FFDDEBF7";
+
+/**
+ * ساخت فایل اکسل گزارش روزانه‌ی استاندارد کارگاه.
+ * چهار بخش: کارکرد نیرو، فعالیت‌ها، موانع، دوباره‌کاری.
+ */
+export async function buildDailyExcel(
+  project: Project,
+  day: WorkDay,
+  summary: DaySummary,
+): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "روزنگار";
+  wb.created = new Date();
+
+  // ── برگه‌ی کارکرد نیرو ─────────────────────────────
+  const ws = wb.addWorksheet("کارکرد نیرو", {
+    views: [{ rightToLeft: true }],
+  });
+
+  titleBlock(ws, project, day, 7);
+
+  const head = [
+    "ردیف",
+    "نام نیرو",
+    "تخصص",
+    "ورود",
+    "خروج",
+    "کارکرد",
+    "اضافه‌کاری",
+  ];
+  addHeaderRow(ws, head);
+
+  summary.attendance.forEach((a, i) => {
+    ws.addRow([
+      i + 1,
+      a.name,
+      a.trade ?? "-",
+      a.entry ?? "-",
+      a.exit ?? "-",
+      a.dayFraction >= 1
+        ? `۱ روز${a.overtimeMinutes ? "" : ""}`
+        : humanDuration(a.workedMinutes),
+      a.overtimeMinutes ? humanDuration(a.overtimeMinutes) : "-",
+    ]);
+  });
+  ws.addRow([]);
+  ws.addRow(["", "جمع نفرات:", summary.workerCount]);
+  autoWidth(ws, [6, 22, 16, 10, 10, 18, 16]);
+
+  // ── برگه‌ی فعالیت‌ها ───────────────────────────────
+  const wsAct = wb.addWorksheet("فعالیت‌ها", {
+    views: [{ rightToLeft: true }],
+  });
+  titleBlock(wsAct, project, day, 4);
+  addHeaderRow(wsAct, ["جبهه‌ی کاری", "نوع فعالیت", "شرح", "نیروها"]);
+  for (const a of summary.activities) {
+    wsAct.addRow([
+      a.workFront ?? "-",
+      a.activityType ?? "-",
+      a.description,
+      a.workers.join("، ") || "-",
+    ]);
+  }
+  autoWidth(wsAct, [22, 20, 45, 30]);
+
+  // ── برگه‌ی موانع و مشکلات ──────────────────────────
+  const wsIss = wb.addWorksheet("موانع و مشکلات", {
+    views: [{ rightToLeft: true }],
+  });
+  titleBlock(wsIss, project, day, 3);
+  addHeaderRow(wsIss, ["نوع", "شرح", "اثر/علت"]);
+  for (const i of summary.issues) {
+    wsIss.addRow([i.type, i.description, i.impact ?? "-"]);
+  }
+  autoWidth(wsIss, [14, 50, 30]);
+
+  // ── برگه‌ی دوباره‌کاری ─────────────────────────────
+  const wsRw = wb.addWorksheet("دوباره‌کاری", {
+    views: [{ rightToLeft: true }],
+  });
+  titleBlock(wsRw, project, day, 4);
+  addHeaderRow(wsRw, ["محل", "مقدار", "علت", "شرح"]);
+  for (const r of summary.reworks) {
+    wsRw.addRow([r.workFront ?? "-", r.amount ?? "-", r.cause ?? "-", r.description]);
+  }
+  autoWidth(wsRw, [22, 16, 30, 45]);
+
+  const arrayBuffer = await wb.xlsx.writeBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+function titleBlock(
+  ws: ExcelJS.Worksheet,
+  project: Project,
+  day: WorkDay,
+  span: number,
+) {
+  const r1 = ws.addRow([`گزارش روزانه‌ی ${project.name}`]);
+  ws.mergeCells(r1.number, 1, r1.number, span);
+  styleTitle(r1.getCell(1), 14);
+
+  const r2 = ws.addRow([
+    `شماره گزارش: ${day.reportNo ?? "-"}    |    تاریخ: ${day.dateLabel}`,
+  ]);
+  ws.mergeCells(r2.number, 1, r2.number, span);
+  styleTitle(r2.getCell(1), 11, false);
+  ws.addRow([]);
+}
+
+function styleTitle(cell: ExcelJS.Cell, size: number, bold = true) {
+  cell.font = { bold, size, color: { argb: "FF1F4E78" } };
+  cell.alignment = { horizontal: "center", vertical: "middle" };
+}
+
+function addHeaderRow(ws: ExcelJS.Worksheet, cols: string[]) {
+  const row = ws.addRow(cols);
+  row.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: HEADER_FILL },
+    };
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+    cell.border = thinBorder();
+  });
+}
+
+function autoWidth(ws: ExcelJS.Worksheet, widths: number[]) {
+  widths.forEach((w, i) => {
+    ws.getColumn(i + 1).width = w;
+  });
+  // حاشیه برای همه‌ی سلول‌های داده
+  ws.eachRow((row) => {
+    row.eachCell((cell) => {
+      if (!cell.border) cell.border = thinBorder();
+      if (!cell.alignment)
+        cell.alignment = { vertical: "middle", wrapText: true };
+    });
+  });
+}
+
+function thinBorder(): Partial<ExcelJS.Borders> {
+  const s = { style: "thin" as const, color: { argb: "FFBFBFBF" } };
+  return { top: s, bottom: s, left: s, right: s };
+}
+
+// جلوگیری از هشدار استفاده‌نشده
+void SUBHEAD_FILL;

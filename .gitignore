@@ -1,0 +1,31 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# env files (secrets)
+.env
+.env*.local
+.env.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+
+# drizzle local
+/drizzle/meta/_journal_local.json
+
+# logs & os
+*.log
+.DS_Store
+/tmp
