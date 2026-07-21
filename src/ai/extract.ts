@@ -197,6 +197,31 @@ export function parseActivityTime(text: string): Promise<TimeAnswer> {
   );
 }
 
+export interface EntryExitAnswer {
+  entry?: string;
+  exit?: string;
+}
+
+/** تحلیل پاسخ کاربر برای ساعت ورود و خروج یک نیرو */
+export function parseEntryExit(
+  text: string,
+  workerName: string,
+): Promise<EntryExitAnswer> {
+  return parseWithSchema<EntryExitAnswer>(
+    `ساعت ورود و خروج نیرویی به نام «${workerName}» را از این جمله استخراج کن: «${text}».\n` +
+      `- entry: ساعت ورود (معمولاً صبح) به‌صورت HH:MM ۲۴ساعته.\n` +
+      `- exit: ساعت خروج (معمولاً عصر) به‌صورت HH:MM ۲۴ساعته.\n` +
+      `- «۷ تا ۵» یعنی entry=07:00 و exit=17:00. «۸ اومد ۸ رفت» یعنی entry=08:00 و exit=20:00.`,
+    {
+      type: Type.OBJECT,
+      properties: {
+        entry: { type: Type.STRING, nullable: true },
+        exit: { type: Type.STRING, nullable: true },
+      },
+    },
+  );
+}
+
 export interface CoverageAnswer {
   description?: string;
   workFront?: string;
