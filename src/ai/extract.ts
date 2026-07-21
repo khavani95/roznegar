@@ -1,27 +1,51 @@
 import { Type } from "@google/genai";
 import { getGemini } from "./gemini";
 import { extractionResponseSchema, type ExtractedEventItem } from "./schema";
+import { extractAttendanceFromText } from "./attendance-fallback";
 import { config } from "@/lib/config";
 
 const SYSTEM_INSTRUCTION = `تو دستیار ثبت گزارش روزانه‌ی یک کارگاه ساختمانی هستی.
-از پیام (متنی یا صوتی) سرکارگر، داده‌های ساختاریافته استخراج می‌کنی.
+از پیام (متنی یا صوتی) سرکارگر، همه‌ی داده‌ها را استخراج و در آرایه‌ی events برمی‌گردانی.
 
-قواعد مهم:
-- هر پیام ممکن است شامل چند رویداد باشد؛ همه را در آرایه‌ی events برگردان.
-- برای ثبت کارکرد نیرو از type="attendance" با فیلدهای workerName و event (ورود/خروج) و time استفاده کن.
-- ساعت را همیشه به‌صورت HH:MM و ۲۴ساعته برگردان. از متن، صبح یا عصر بودن را تشخیص بده:
-  «علی ساعت ۸ اومد» یعنی ورود ساعت ۰۸:۰۰ صبح.
-  «علی ساعت ۸ رفت» یعنی خروج ساعت ۲۰:۰۰ عصر.
-  «ظهر رفت» حدود ۱۲:۰۰، «عصر» بعدازظهر، «شب» بعد از ۱۸:۰۰.
-- برای فعالیت اجرایی از type="activity" با workFront (محل/جبهه‌ی کاری)، activityType، description و workers استفاده کن.
-  * نام نیروهایی که در فعالیت درگیر بودند را حتماً در آرایه‌ی workers بیاور (مثلاً «علی و رضا آرماتوربندی کردن» → workers=["علی","رضا"]).
-  * اگر بازه‌ی زمانی فعالیت گفته شد، startTime و endTime را پر کن (HH:MM). اگر گفته شد تمام روز/کل روز/از صبح تا شب، isFullDay=true بگذار.
-- برای مانع/مشکل/تأخیر از type="issue" با issueType و description.
-- برای دوباره‌کاری از type="rework" با workFront، amount، cause و description.
-- برای معرفی نیروی جدید از type="worker_new" با workerName و trade (تخصص).
-- اگر پیام نامفهوم بود یا داده‌ی گزارشی نداشت، type="other" برگردان.
-- چیزی از خودت نساز؛ فقط آنچه در پیام هست را استخراج کن. اگر ساعت ذکر نشده، فیلد time را خالی بگذار.
-- نام نیروها را دقیقاً همان‌طور که گفته شده برگردان (بدون تغییر).`;
+## کارکرد نیرو (خیلی مهم — دقت کن)
+- برای هر نیرویی که ورود یا خروجش اعلام می‌شود، یک رویداد جداگانه با type="attendance" بساز.
+- ⚠️ هیچ نیرویی را جا ننداز. اگر پیام چند خط یا چند نفر دارد، برای هرکدام یک رویداد جدا بده.
+  اگر ۳ نفر در پیام هستند، باید دقیقاً ۳ رویداد attendance بدهی.
+- کلمات «اومد، آمد، امد، اومدن، آمدند، اومدند، رسید، حاضر شد» یعنی event="ورود".
+- کلمات «رفت، رفتن، رفتند، خارج شد، مرخص شد» یعنی event="خروج".
+- ⚠️ هر وقت ساعتی گفته شده (مثل «ساعت ۸»)، حتماً فیلد time را با فرمت HH:MM (۲۴ساعته) پر کن.
+  هیچ‌وقت وقتی ساعت در متن هست، time را خالی نگذار.
+- تشخیص صبح/عصر:
+  * ورود معمولاً صبح است: «۷ اومد» → 07:00 ، «۸ اومد» → 08:00.
+  * خروج معمولاً بعدازظهر/عصر است: «۴ رفت» → 16:00 ، «۵ رفت» → 17:00 ، «۸ رفت» → 20:00.
+  * «ظهر» ~12:00.
+- workerName را دقیقاً همان نام و نام‌خانوادگیِ گفته‌شده بگذار (بدون تغییر).
+
+## مثال (حتماً مثل این کامل جواب بده)
+پیام:
+«ایدین نوری ساعت ۸ اومد
+محمد خوانی ساعت ۸ اومد
+شایان مومن ساعت ۵ رفت»
+خروجی درست:
+events = [
+  { type:"attendance", workerName:"ایدین نوری", event:"ورود", time:"08:00" },
+  { type:"attendance", workerName:"محمد خوانی", event:"ورود", time:"08:00" },
+  { type:"attendance", workerName:"شایان مومن", event:"خروج", time:"17:00" }
+]
+
+## انواع دیگر رویداد
+- فعالیت اجرایی: type="activity" با workFront، activityType، description و workers
+  (نام همه‌ی نیروهای درگیر را در workers بیاور). اگر زمان گفته شد startTime/endTime (HH:MM)
+  و اگر تمام‌روز بود isFullDay=true.
+- مانع/مشکل/تأخیر: type="issue" با issueType و description.
+- دوباره‌کاری: type="rework" با workFront، amount، cause و description.
+- نیروی جدید: type="worker_new" با workerName و trade.
+- نامفهوم/بدون داده: type="other".
+
+## قواعد کلی
+- هر خط از پیام را جداگانه بررسی کن و مطمئن شو هیچ‌کس و هیچ داده‌ای جا نماند.
+- چیزی از خودت نساز؛ فقط آنچه در پیام هست. اگر ساعت اصلاً گفته نشده، time را خالی بگذار
+  (ولی اگر گفته شده، حتماً پرش کن).`;
 
 interface ExtractInput {
   /** متن پیام (برای پیام متنی) */
@@ -41,56 +65,93 @@ export interface ExtractResult {
 
 /**
  * از متن یا صوت، رویدادهای گزارش را استخراج می‌کند.
- * برای صوت، جِمِنای هم‌زمان پیاده‌سازی و استخراج را انجام می‌دهد (مالتی‌مودال).
+ * صوت اول به متن پیاده می‌شود، سپس همان مسیر متنی اجرا می‌شود تا هر دو
+ * از پارسر قطعیِ ورود/خروج هم بهره ببرند.
  */
 export async function extractEvents(input: ExtractInput): Promise<ExtractResult> {
+  let text = input.text ?? "";
+  let transcript: string | undefined;
+
+  if (input.audioBase64) {
+    transcript = await transcribeAudio(
+      input.audioBase64,
+      input.audioMimeType || "audio/ogg",
+    );
+    text = transcript;
+  }
+
+  // لایه‌ی ۱: هوش مصنوعی (برای جمله‌های روان و انواع رویداد)
+  const aiEvents = await aiExtractText(text, input.knownWorkers);
+  // لایه‌ی ۲: پارسر قطعی ورود/خروج (تضمین عدم جا افتادن)
+  const regexEvents = extractAttendanceFromText(text);
+
+  return { events: mergeAttendance(aiEvents, regexEvents), transcript };
+}
+
+/** فراخوانی جِمِنای روی متن با اسکیمای ساختاریافته */
+async function aiExtractText(
+  text: string,
+  knownWorkers?: string[],
+): Promise<ExtractedEventItem[]> {
+  if (!text.trim()) return [];
   const ai = getGemini();
 
   const knownList =
-    input.knownWorkers && input.knownWorkers.length
-      ? `\n\nنیروهای شناخته‌شده‌ی این کارگاه: ${input.knownWorkers.join("، ")}.\nاگر نامی نزدیک به این‌هاست، همان نام استاندارد را برگردان.`
+    knownWorkers && knownWorkers.length
+      ? `\n\nنیروهای شناخته‌شده‌ی این کارگاه: ${knownWorkers.join("، ")}.\nاگر نامی نزدیک به این‌هاست، همان نام استاندارد را برگردان.`
       : "";
-
-  // ساخت محتوای ورودی: متن یا صوت
-  const parts: Array<Record<string, unknown>> = [];
-
-  if (input.audioBase64) {
-    parts.push({
-      inlineData: {
-        mimeType: input.audioMimeType || "audio/ogg",
-        data: input.audioBase64,
-      },
-    });
-    parts.push({
-      text:
-        "این یک پیام صوتی فارسی از سرکارگر است. اول آن را دقیق به متن فارسی پیاده کن، سپس رویدادها را استخراج کن." +
-        " متن پیاده‌شده را در description رویداد نوع other هم بیاور اگر جای دیگری نمی‌گنجد." +
-        knownList,
-    });
-  } else {
-    parts.push({ text: `پیام سرکارگر: «${input.text || ""}»${knownList}` });
-  }
 
   const response = await ai.models.generateContent({
     model: config.gemini.model,
-    contents: [{ role: "user", parts }],
+    contents: [
+      { role: "user", parts: [{ text: `پیام سرکارگر:\n${text}${knownList}` }] },
+    ],
     config: {
       systemInstruction: SYSTEM_INSTRUCTION,
       responseMimeType: "application/json",
       responseSchema: extractionResponseSchema,
-      temperature: 0.1,
+      temperature: 0,
     },
   });
 
-  const raw = response.text ?? "{}";
-  let parsed: { events?: ExtractedEventItem[] };
   try {
-    parsed = JSON.parse(raw);
+    const parsed = JSON.parse(response.text ?? "{}") as {
+      events?: ExtractedEventItem[];
+    };
+    return parsed.events ?? [];
   } catch {
-    parsed = { events: [] };
+    return [];
+  }
+}
+
+/**
+ * ادغام رویدادهای هوش مصنوعی و پارسر قطعی.
+ * رویدادهای کارکردِ بدون داده حذف، و در تعارض، نسخه‌ای که «زمان» دارد نگه داشته می‌شود.
+ */
+function mergeAttendance(
+  aiEvents: ExtractedEventItem[],
+  regexEvents: ExtractedEventItem[],
+): ExtractedEventItem[] {
+  const norm = (s?: string) => (s ?? "").replace(/\s+/g, " ").trim();
+  const key = (e: ExtractedEventItem) => `${norm(e.workerName)}|${e.event ?? ""}`;
+
+  const attendance = new Map<string, ExtractedEventItem>();
+
+  // فقط رویدادهای کارکردِ باارزش هوش مصنوعی (رویداد یا زمان داشته باشند)
+  for (const e of aiEvents) {
+    if (e.type === "attendance" && (e.event || e.time)) {
+      attendance.set(key(e), e);
+    }
+  }
+  // پارسر قطعی: اگر نبود اضافه کن؛ اگر نسخه‌ی قبلی زمان نداشت، جایگزین کن
+  for (const e of regexEvents) {
+    const k = key(e);
+    const prev = attendance.get(k);
+    if (!prev || (!prev.time && e.time)) attendance.set(k, e);
   }
 
-  return { events: parsed.events ?? [] };
+  const nonAttendance = aiEvents.filter((e) => e.type !== "attendance");
+  return [...attendance.values(), ...nonAttendance];
 }
 
 /**

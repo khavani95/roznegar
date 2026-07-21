@@ -207,13 +207,14 @@ function registerHandlers(bot: Bot) {
       }
 
       const known = (await listWorkers(project.id)).map((w) => w.fullName);
-      const { events } = await extractEvents({
+      const { events, transcript } = await extractEvents({
         audioBase64,
         audioMimeType: "audio/ogg",
         knownWorkers: known,
       });
       await persist(day.id, ctx.message?.message_id, "voice", events, {
         telegramFileId: file.file_id,
+        transcript,
       });
       await ctx.reply(formatAck(events));
     } catch (e) {
