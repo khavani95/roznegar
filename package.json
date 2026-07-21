@@ -5,11 +5,12 @@
   "description": "چت‌بات هوشمند تلگرام برای گزارش روزانه کارگاه",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "tsx scripts/migrate.ts && next build",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx scripts/migrate.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "set-webhook": "tsx scripts/set-webhook.ts"

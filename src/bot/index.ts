@@ -1,4 +1,4 @@
-import { Bot, InputFile, type Context } from "grammy";
+import { Bot, InputFile, InlineKeyboard, type Context } from "grammy";
 import { config } from "@/lib/config";
 import { BTN, MSG, mainKeyboard } from "./text";
 import { formatAck, formatDaySummary } from "./format";
@@ -13,6 +13,8 @@ import {
   getConversationState,
   setConversationState,
   clearConversationState,
+  listDayActivities,
+  linkWorkerToActivity,
 } from "@/db/queries";
 import { extractEvents, transcribeAudio } from "@/ai/extract";
 import { consolidateDay, loadDaySummary } from "@/services/consolidate";
@@ -25,7 +27,7 @@ import {
 import { buildDailyExcel } from "@/services/report-excel";
 import { toFaDigits } from "@/lib/jalali";
 import type { ExtractedEventItem } from "@/ai/schema";
-import type { Project, WorkDay, ConversationState } from "@/db/schema";
+import type { Project, WorkDay, ConversationState, WizardItem } from "@/db/schema";
 
 let _bot: Bot | null = null;
 
@@ -134,7 +136,52 @@ function registerHandlers(bot: Bot) {
     let intro = `📝 قبل از ثبت نهایی، ${toFaDigits(queue.length)} مورد باید کامل شود:`;
     if (warns.length) intro += "\n\n" + warns.join("\n");
     await ctx.reply(intro);
-    await ctx.reply(questionText(queue[0]));
+    await askItem(ctx, queue[0], day.id);
+  });
+
+  // ── انتخاب فعالیت با دکمه (مرحله‌ی پوشش ویزارد) ─────
+  bot.on("callback_query:data", async (ctx) => {
+    const data = ctx.callbackQuery.data;
+    const chatId = ctx.chat?.id;
+    if (!chatId) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const state = await getConversationState(chatId);
+    if (!state || state.phase !== "wizard" || !state.queue.length) {
+      await ctx.answerCallbackQuery({ text: "این مورد منقضی شده." });
+      return;
+    }
+    const item = state.queue[0];
+    const parts = data.split(":"); // wz:cov:<workerId>:<activityId> | wz:skip:<workerId>
+    if (item.kind !== "coverage" || Number(parts[2]) !== item.workerId) {
+      await ctx.answerCallbackQuery({ text: "مربوط به مورد دیگری است." });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    try {
+      await ctx.editMessageReplyMarkup();
+    } catch {
+      // بی‌اهمیت
+    }
+
+    const project = await getOrCreateProject(chatId);
+    const day = await getOpenWorkDay(project.id);
+    if (!day) {
+      await ctx.reply(MSG.noOpenDay);
+      return;
+    }
+    const workDayId = state.workDayId ?? day.id;
+
+    if (parts[1] === "skip") {
+      await ctx.reply("رد شد.");
+    } else if (parts[1] === "cov") {
+      await linkWorkerToActivity(Number(parts[3]), item.workerId!);
+      await ctx.reply(`✅ «${item.label}» به فعالیت وصل شد.`);
+    }
+    await advanceWizard(bot, ctx, project, day, state.queue.slice(1), workDayId);
   });
 
   // ── پیام صوتی ──────────────────────────────────────
@@ -152,7 +199,6 @@ function registerHandlers(bot: Bot) {
       const res = await fetch(url);
       const audioBase64 = Buffer.from(await res.arrayBuffer()).toString("base64");
 
-      // اگر در ویزارد هستیم، صوت را به متن تبدیل و به‌عنوان پاسخ پردازش کن
       const state = await getConversationState(ctx.chat.id);
       if (state?.phase === "wizard" && state.queue.length) {
         const answer = await transcribeAudio(audioBase64);
@@ -205,7 +251,49 @@ function registerHandlers(bot: Bot) {
   });
 }
 
-/** پردازش یک پاسخ در ویزارد پایان روز و رفتن به مرحله‌ی بعد */
+/** نمایش یک آیتم ویزارد؛ برای «پوشش» دکمه‌های انتخاب فعالیت نشان می‌دهد */
+async function askItem(ctx: Context, item: WizardItem, workDayId: number) {
+  if (item.kind !== "coverage") {
+    await ctx.reply(questionText(item));
+    return;
+  }
+
+  const acts = await listDayActivities(workDayId);
+  const kb = new InlineKeyboard();
+  for (const a of acts) {
+    const raw = a.workFront ? `${a.workFront} — ${a.description}` : a.description;
+    kb.text(truncate(raw, 45), `wz:cov:${item.workerId}:${a.id}`).row();
+  }
+  kb.text("رد کردن", `wz:skip:${item.workerId}`);
+
+  const head = acts.length
+    ? `🏗️ «${item.label}» کدام فعالیت را انجام داد؟\n` +
+      `یکی را انتخاب کن، یا فعالیت جدیدی تایپ کن (مثلاً: «بتن‌ریزی طبقه ۲، تمام‌روز»).`
+    : `🏗️ «${item.label}» امروز چه کاری و کجا انجام داد؟\n` +
+      `مثال: «آرماتوربندی طبقه ۳، از ۸ تا ۴» (یا بنویس: رد)`;
+  await ctx.reply(head, { reply_markup: kb });
+}
+
+/** رفتن به آیتم بعدی ویزارد یا نهایی‌سازی روز */
+async function advanceWizard(
+  bot: Bot,
+  ctx: Context,
+  project: Project,
+  day: WorkDay,
+  rest: WizardItem[],
+  workDayId: number,
+) {
+  if (rest.length) {
+    await setConversationState(ctx.chat!.id, workDayId, "wizard", rest);
+    await ctx.reply(`(باقی‌مانده: ${toFaDigits(rest.length)})`);
+    await askItem(ctx, rest[0], workDayId);
+  } else {
+    await ctx.reply("✅ همه‌ی موارد کامل شد. در حال ساخت گزارش…");
+    await finalizeDay(bot, ctx, project, day);
+  }
+}
+
+/** پردازش یک پاسخ متنی/صوتی در ویزارد و رفتن به مرحله‌ی بعد */
 async function handleWizardAnswer(
   bot: Bot,
   ctx: Context,
@@ -223,19 +311,11 @@ async function handleWizardAnswer(
 
   // اگر پاسخ فهمیده نشد و رد هم نکرد، همان سؤال دوباره پرسیده شود
   if (!res.ok && !res.skipped) {
-    await ctx.reply(questionText(item));
+    await askItem(ctx, item, workDayId);
     return;
   }
 
-  const rest = queue.slice(1);
-  if (rest.length) {
-    await setConversationState(ctx.chat!.id, workDayId, "wizard", rest);
-    await ctx.reply(`(باقی‌مانده: ${toFaDigits(rest.length)})`);
-    await ctx.reply(questionText(rest[0]));
-  } else {
-    await ctx.reply("✅ همه‌ی موارد کامل شد. در حال ساخت گزارش…");
-    await finalizeDay(bot, ctx, project, day);
-  }
+  await advanceWizard(bot, ctx, project, day, queue.slice(1), workDayId);
 }
 
 /** ساخت و ارسال گزارش نهایی، بستن روز و پاک‌کردن وضعیت */
@@ -298,4 +378,9 @@ async function persist(
       payload: e as unknown as Record<string, unknown>,
     })),
   );
+}
+
+/** کوتاه‌کردن متن دکمه */
+function truncate(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }

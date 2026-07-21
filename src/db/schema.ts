@@ -186,10 +186,12 @@ export const conversationState = pgTable("conversation_state", {
 
 /** یک سؤال معلق در ویزارد پایان روز */
 export interface WizardItem {
-  kind: "profile" | "activity_time" | "coverage";
+  kind: "profile" | "attendance_time" | "activity_time" | "coverage";
   workerId?: number;
   workerName?: string;
   activityId?: number;
+  entry?: string | null; // ساعت ورودِ موجود (برای attendance_time)
+  exit?: string | null; // ساعت خروجِ موجود (برای attendance_time)
   label: string; // توضیح انسانی برای طرح سؤال
 }
 

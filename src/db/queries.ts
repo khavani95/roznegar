@@ -8,6 +8,7 @@ import {
   extractedEvents,
   activities,
   activityWorkers,
+  attendance,
   conversationState,
   type Project,
   type Worker,
@@ -16,6 +17,7 @@ import {
   type WizardItem,
 } from "./schema";
 import { toJalali } from "@/lib/jalali";
+import { calcWork } from "@/services/attendance-calc";
 
 /** پروژه‌ی متناظر با یک چت تلگرام را می‌گیرد یا می‌سازد */
 export async function getOrCreateProject(chatId: number): Promise<Project> {
@@ -179,6 +181,71 @@ export async function updateWorkerProfile(
   if (data.trade) patch.trade = data.trade;
   if (data.employmentType) patch.employmentType = data.employmentType;
   await db.update(workers).set(patch).where(eq(workers.id, workerId));
+}
+
+/** ثبت ساعت ورود/خروج یک نیرو و بازمحاسبه‌ی کارکرد */
+export async function updateAttendanceTime(
+  workDayId: number,
+  workerId: number,
+  entry: string | null,
+  exit: string | null,
+) {
+  const db = getDb();
+  const patch: Record<string, unknown> = {
+    entryTime: entry,
+    exitTime: exit,
+  };
+  if (entry && exit) {
+    const calc = calcWork(entry, exit);
+    if (calc) {
+      patch.breakMinutes = calc.breakMinutes;
+      patch.workedMinutes = calc.workedMinutes;
+      patch.dayFraction = calc.dayFraction;
+      patch.overtimeMinutes = calc.overtimeMinutes;
+    }
+  }
+  await db
+    .update(attendance)
+    .set(patch)
+    .where(
+      and(
+        eq(attendance.workDayId, workDayId),
+        eq(attendance.workerId, workerId),
+      ),
+    );
+}
+
+/** فهرست فعالیت‌های یک روز (برای دکمه‌های انتخاب در ویزارد) */
+export async function listDayActivities(workDayId: number) {
+  const db = getDb();
+  return db
+    .select({
+      id: activities.id,
+      description: activities.description,
+      workFront: activities.workFront,
+    })
+    .from(activities)
+    .where(eq(activities.workDayId, workDayId));
+}
+
+/** اتصال یک نیرو به یک فعالیت موجود (بدون ساخت فعالیت جدید) */
+export async function linkWorkerToActivity(
+  activityId: number,
+  workerId: number,
+) {
+  const db = getDb();
+  const existing = await db
+    .select({ id: activityWorkers.id })
+    .from(activityWorkers)
+    .where(
+      and(
+        eq(activityWorkers.activityId, activityId),
+        eq(activityWorkers.workerId, workerId),
+      ),
+    )
+    .limit(1);
+  if (existing[0]) return;
+  await db.insert(activityWorkers).values({ activityId, workerId });
 }
 
 /** ثبت بازه‌ی زمانی یک فعالیت */

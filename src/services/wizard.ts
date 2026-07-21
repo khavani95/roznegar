@@ -4,10 +4,12 @@ import {
   parseWorkerProfile,
   parseActivityTime,
   parseCoverageActivity,
+  parseEntryExit,
 } from "@/ai/extract";
 import {
   updateWorkerProfile,
   updateActivityTime,
+  updateAttendanceTime,
   addCoverageActivity,
 } from "@/db/queries";
 import { humanDuration } from "./attendance-calc";
@@ -22,7 +24,7 @@ export function isSkip(text: string): boolean {
 
 /**
  * از خلاصه‌ی روز، صف سؤال‌های اجباری ویزارد را می‌سازد:
- * ۱) پروفایل ناقص  ۲) فعالیت بدون زمان  ۳) نفرِ بدون فعالیت.
+ * ۱) پروفایل ناقص  ۲) ورود/خروج ناقص  ۳) فعالیت بدون زمان  ۴) نفرِ بدون فعالیت.
  */
 export function buildWizardQueue(summary: DaySummary): WizardItem[] {
   const queue: WizardItem[] = [];
@@ -33,6 +35,20 @@ export function buildWizardQueue(summary: DaySummary): WizardItem[] {
         kind: "profile",
         workerId: w.workerId,
         workerName: w.name,
+        label: w.name,
+      });
+    }
+  }
+
+  // ورود/خروج اجباری: اگر یکی از ساعت‌ها ثبت نشده، پرسیده شود
+  for (const w of summary.attendance) {
+    if (!w.entry || !w.exit) {
+      queue.push({
+        kind: "attendance_time",
+        workerId: w.workerId,
+        workerName: w.name,
+        entry: w.entry,
+        exit: w.exit,
         label: w.name,
       });
     }
@@ -88,6 +104,18 @@ export function questionText(item: WizardItem): string {
         `مثال: «علی رضایی، آرماتوربند، روزمزد»\n` +
         `(برای رد کردن بنویس: رد)`
       );
+    case "attendance_time": {
+      const known = item.entry
+        ? `ورود ${item.entry} ثبت شده؛ ساعت خروجش را بگو.`
+        : item.exit
+          ? `خروج ${item.exit} ثبت شده؛ ساعت ورودش را بگو.`
+          : `ساعت ورود و خروجش را بگو.`;
+      return (
+        `⏰ ساعتِ «${item.label}» کامل نیست. ${known}\n` +
+        `مثال: «۷ تا ۵»\n` +
+        `(برای رد کردن بنویس: رد)`
+      );
+    }
     case "activity_time":
       return (
         `⏱️ فعالیتِ «${item.label}» چه ساعتی تا چه ساعتی انجام شد؟\n` +
@@ -131,6 +159,20 @@ export async function processAnswer(
           (p.trade ? ` — ${p.trade}` : "") +
           (p.employmentType ? ` (${p.employmentType})` : ""),
       };
+    }
+    case "attendance_time": {
+      const t = await parseEntryExit(text, item.label);
+      const entry = t.entry ?? item.entry ?? null;
+      const exit = t.exit ?? item.exit ?? null;
+      if (!entry || !exit) {
+        return {
+          ok: false,
+          skipped: false,
+          note: "هر دو ساعت ورود و خروج را بگو (مثلاً «۷ تا ۵»).",
+        };
+      }
+      await updateAttendanceTime(workDayId, item.workerId!, entry, exit);
+      return { ok: true, skipped: false, note: `✅ ${entry}–${exit}` };
     }
     case "activity_time": {
       const t = await parseActivityTime(text);
