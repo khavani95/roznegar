@@ -74,8 +74,13 @@ export function formatDaySummary(day: WorkDay, s: DaySummary): string {
     parts.push("");
     parts.push("🏗️ فعالیت‌ها:");
     for (const a of s.activities) {
+      const time = a.isFullDay
+        ? " (تمام‌روز)"
+        : a.startTime && a.endTime
+          ? ` (${a.startTime}–${a.endTime})`
+          : "";
       parts.push(
-        `• ${a.workFront ? a.workFront + " — " : ""}${a.description}`,
+        `• ${a.workFront ? a.workFront + " — " : ""}${a.description}${time}`,
       );
     }
   }
