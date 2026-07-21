@@ -33,10 +33,12 @@ export const workers = pgTable(
     projectId: integer("project_id")
       .notNull()
       .references(() => projects.id),
-    fullName: text("full_name").notNull(),
+    fullName: text("full_name").notNull(), // نام و نام‌خانوادگی کامل
     aliases: jsonb("aliases").$type<string[]>().notNull().default([]),
     trade: text("trade"), // تخصص: بنا، آرماتوربند، جوشکار، ...
-    contractor: text("contractor"), // پیمانکار
+    contractor: text("contractor"), // نام پیمانکار (در صورت پیمانکاری)
+    employmentType: text("employment_type"), // روزمزد | پیمانکار
+    profileStatus: text("profile_status").notNull().default("pending"), // pending | complete
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
@@ -143,11 +145,53 @@ export const activities = pgTable(
     activityType: text("activity_type"), // نوع فعالیت
     description: text("description").notNull(),
     workerNames: jsonb("worker_names").$type<string[]>().notNull().default([]),
+    startTime: text("start_time"), // HH:MM
+    endTime: text("end_time"), // HH:MM
+    isFullDay: boolean("is_full_day").notNull().default(false), // تمام‌روز
     progress: text("progress"), // درصد پیشرفت (اختیاری)
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [index("activities_day_idx").on(t.workDayId)],
 );
+
+/**
+ * جدول رابط فعالیت↔نیرو (چند-به-چند).
+ * نتیجه‌ی نسبت‌دادن نفرات به فعالیت‌ها در مرحله‌ی تجمیع.
+ */
+export const activityWorkers = pgTable(
+  "activity_workers",
+  {
+    id: serial("id").primaryKey(),
+    activityId: integer("activity_id")
+      .notNull()
+      .references(() => activities.id),
+    workerId: integer("worker_id")
+      .notNull()
+      .references(() => workers.id),
+  },
+  (t) => [index("activity_workers_idx").on(t.activityId)],
+);
+
+/**
+ * وضعیت گفتگو برای «ویزارد کنترل پایان روز».
+ * چون Vercel بی‌حالت است، وضعیت سؤال‌های تعاملی اینجا نگه داشته می‌شود.
+ */
+export const conversationState = pgTable("conversation_state", {
+  chatId: bigint("chat_id", { mode: "number" }).primaryKey(),
+  workDayId: integer("work_day_id").references(() => workDays.id),
+  phase: text("phase").notNull().default("idle"), // idle | wizard
+  queue: jsonb("queue").$type<WizardItem[]>().notNull().default([]),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+/** یک سؤال معلق در ویزارد پایان روز */
+export interface WizardItem {
+  kind: "profile" | "activity_time" | "coverage";
+  workerId?: number;
+  workerName?: string;
+  activityId?: number;
+  label: string; // توضیح انسانی برای طرح سؤال
+}
 
 /**
  * موانع، مشکلات و تأخیرات.
@@ -196,3 +240,5 @@ export type Attendance = typeof attendance.$inferSelect;
 export type Activity = typeof activities.$inferSelect;
 export type Issue = typeof issues.$inferSelect;
 export type Rework = typeof reworks.$inferSelect;
+export type ActivityWorker = typeof activityWorkers.$inferSelect;
+export type ConversationState = typeof conversationState.$inferSelect;

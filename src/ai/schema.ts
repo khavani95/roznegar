@@ -26,6 +26,9 @@ export interface ExtractedEventItem {
   activityType?: string;
   description?: string;
   workers?: string[];
+  startTime?: string; // HH:MM شروع فعالیت
+  endTime?: string; // HH:MM پایان فعالیت
+  isFullDay?: boolean; // فعالیت تمام‌روز
   issueType?: "مانع" | "مشکل" | "تاخیر";
   amount?: string;
   cause?: string;
@@ -82,6 +85,21 @@ export const extractionResponseSchema = {
             type: Type.ARRAY,
             items: { type: Type.STRING },
             description: "نام نیروهای درگیر در فعالیت",
+            nullable: true,
+          },
+          startTime: {
+            type: Type.STRING,
+            description: "ساعت شروع فعالیت به‌صورت HH:MM",
+            nullable: true,
+          },
+          endTime: {
+            type: Type.STRING,
+            description: "ساعت پایان فعالیت به‌صورت HH:MM",
+            nullable: true,
+          },
+          isFullDay: {
+            type: Type.BOOLEAN,
+            description: "آیا فعالیت تمام‌روز بوده است",
             nullable: true,
           },
           issueType: {

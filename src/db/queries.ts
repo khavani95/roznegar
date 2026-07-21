@@ -6,9 +6,14 @@ import {
   workDays,
   rawMessages,
   extractedEvents,
+  activities,
+  activityWorkers,
+  conversationState,
   type Project,
   type Worker,
   type WorkDay,
+  type ConversationState,
+  type WizardItem,
 } from "./schema";
 import { toJalali } from "@/lib/jalali";
 
@@ -159,4 +164,107 @@ export async function saveEvents(
       payload: e.payload,
     })),
   );
+}
+
+// ── تکمیل پروفایل و فعالیت (ویزارد پایان روز) ────────────
+
+/** تکمیل پروفایل یک نیرو و علامت‌گذاری به‌عنوان کامل */
+export async function updateWorkerProfile(
+  workerId: number,
+  data: { fullName?: string; trade?: string; employmentType?: string },
+) {
+  const db = getDb();
+  const patch: Record<string, unknown> = { profileStatus: "complete" };
+  if (data.fullName) patch.fullName = data.fullName;
+  if (data.trade) patch.trade = data.trade;
+  if (data.employmentType) patch.employmentType = data.employmentType;
+  await db.update(workers).set(patch).where(eq(workers.id, workerId));
+}
+
+/** ثبت بازه‌ی زمانی یک فعالیت */
+export async function updateActivityTime(
+  activityId: number,
+  data: { startTime?: string; endTime?: string; isFullDay?: boolean },
+) {
+  const db = getDb();
+  await db
+    .update(activities)
+    .set({
+      startTime: data.startTime ?? null,
+      endTime: data.endTime ?? null,
+      isFullDay: data.isFullDay ?? false,
+    })
+    .where(eq(activities.id, activityId));
+}
+
+/** افزودن یک فعالیت جدید برای نیروی بدون فعالیت + اتصال او */
+export async function addCoverageActivity(
+  workDayId: number,
+  workerId: number,
+  data: {
+    description: string;
+    workFront?: string;
+    activityType?: string;
+    startTime?: string;
+    endTime?: string;
+    isFullDay?: boolean;
+  },
+) {
+  const db = getDb();
+  const [act] = await db
+    .insert(activities)
+    .values({
+      workDayId,
+      workFront: data.workFront ?? null,
+      activityType: data.activityType ?? null,
+      description: data.description,
+      startTime: data.startTime ?? null,
+      endTime: data.endTime ?? null,
+      isFullDay: data.isFullDay ?? false,
+    })
+    .returning({ id: activities.id });
+  await db
+    .insert(activityWorkers)
+    .values({ activityId: act.id, workerId });
+}
+
+// ── وضعیت گفتگو (ویزارد) ─────────────────────────────────
+
+export async function getConversationState(
+  chatId: number,
+): Promise<ConversationState | null> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(conversationState)
+    .where(eq(conversationState.chatId, chatId))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function setConversationState(
+  chatId: number,
+  workDayId: number,
+  phase: string,
+  queue: WizardItem[],
+) {
+  const db = getDb();
+  await db
+    .insert(conversationState)
+    .values({ chatId, workDayId, phase, queue, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: conversationState.chatId,
+      set: { workDayId, phase, queue, updatedAt: new Date() },
+    });
+}
+
+export async function clearConversationState(chatId: number) {
+  const db = getDb();
+  await db
+    .insert(conversationState)
+    .values({ chatId, phase: "idle", queue: [], updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: conversationState.chatId,
+      set: { phase: "idle", queue: [], workDayId: null, updatedAt: new Date() },
+    });
 }

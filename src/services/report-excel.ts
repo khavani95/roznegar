@@ -24,12 +24,13 @@ export async function buildDailyExcel(
     views: [{ rightToLeft: true }],
   });
 
-  titleBlock(ws, project, day, 7);
+  titleBlock(ws, project, day, 8);
 
   const head = [
     "ردیف",
     "نام نیرو",
     "تخصص",
+    "نوع",
     "ورود",
     "خروج",
     "کارکرد",
@@ -42,33 +43,38 @@ export async function buildDailyExcel(
       i + 1,
       a.name,
       a.trade ?? "-",
+      a.employmentType ?? "-",
       a.entry ?? "-",
       a.exit ?? "-",
-      a.dayFraction >= 1
-        ? `۱ روز${a.overtimeMinutes ? "" : ""}`
-        : humanDuration(a.workedMinutes),
+      a.dayFraction >= 1 ? "۱ روز" : humanDuration(a.workedMinutes),
       a.overtimeMinutes ? humanDuration(a.overtimeMinutes) : "-",
     ]);
   });
   ws.addRow([]);
   ws.addRow(["", "جمع نفرات:", summary.workerCount]);
-  autoWidth(ws, [6, 22, 16, 10, 10, 18, 16]);
+  autoWidth(ws, [6, 22, 14, 12, 9, 9, 16, 14]);
 
   // ── برگه‌ی فعالیت‌ها ───────────────────────────────
   const wsAct = wb.addWorksheet("فعالیت‌ها", {
     views: [{ rightToLeft: true }],
   });
-  titleBlock(wsAct, project, day, 4);
-  addHeaderRow(wsAct, ["جبهه‌ی کاری", "نوع فعالیت", "شرح", "نیروها"]);
+  titleBlock(wsAct, project, day, 5);
+  addHeaderRow(wsAct, ["جبهه‌ی کاری", "نوع فعالیت", "زمان", "شرح", "نیروها"]);
   for (const a of summary.activities) {
+    const time = a.isFullDay
+      ? "تمام‌روز"
+      : a.startTime && a.endTime
+        ? `${a.startTime}–${a.endTime}`
+        : "-";
     wsAct.addRow([
       a.workFront ?? "-",
       a.activityType ?? "-",
+      time,
       a.description,
       a.workers.join("، ") || "-",
     ]);
   }
-  autoWidth(wsAct, [22, 20, 45, 30]);
+  autoWidth(wsAct, [20, 18, 14, 40, 28]);
 
   // ── برگه‌ی موانع و مشکلات ──────────────────────────
   const wsIss = wb.addWorksheet("موانع و مشکلات", {
