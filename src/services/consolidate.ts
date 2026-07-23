@@ -1,7 +1,6 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
-  extractedEvents,
   attendance,
   activities,
   activityWorkers,
@@ -12,8 +11,8 @@ import {
 } from "@/db/schema";
 import { resolveWorker } from "@/db/queries";
 import { calcWork, timeToMinutes } from "./attendance-calc";
-import type { ExtractedEventItem } from "@/ai/schema";
 import { workRules } from "@/lib/config";
+import type { DayData } from "@/ai/day";
 
 export interface AttendanceRow {
   workerId: number;
@@ -57,33 +56,18 @@ export interface DaySummary {
   workerCount: number;
 }
 
-interface RawActivity {
-  workFront: string | null;
-  activityType: string | null;
-  description: string;
-  workers: string[];
-  startTime: string | null;
-  endTime: string | null;
-  isFullDay: boolean;
-}
-
 /**
- * همه‌ی رویدادهای یک روز را می‌خواند، ورود/خروج نیروها را جفت می‌کند،
- * کارکرد را محاسبه، فعالیت‌ها را به نفرات نسبت می‌دهد و جدول‌های نهایی را می‌سازد.
- * idempotent است: با اجرای دوباره، نتایج قبلی روز پاک و بازسازی می‌شوند.
+ * داده‌ی ساختاریافته‌ی یک روز (خروجی استخراج دسته‌ای) را در جدول‌ها می‌نویسد.
+ * idempotent: نتایج قبلی روز پاک و از نو نوشته می‌شوند.
  */
-export async function consolidateDay(
+export async function writeDayData(
   projectId: number,
   workDayId: number,
-): Promise<DaySummary> {
+  data: DayData,
+): Promise<void> {
   const db = getDb();
 
-  const events = await db
-    .select()
-    .from(extractedEvents)
-    .where(eq(extractedEvents.workDayId, workDayId));
-
-  // پاک‌سازی نتایج قبلی این روز (برای اجرای مجدد)
+  // پاک‌سازی نتایج قبلی
   const oldActs = await db
     .select({ id: activities.id })
     .from(activities)
@@ -96,242 +80,177 @@ export async function consolidateDay(
   await db.delete(issues).where(eq(issues.workDayId, workDayId));
   await db.delete(reworks).where(eq(reworks.workDayId, workDayId));
 
-  // جمع‌آوری رویدادها بر اساس نوع
-  const attByWorker = new Map<
-    string,
-    { entry?: string; exit?: string; workFront?: string; trade?: string }
-  >();
-  const rawActivities: RawActivity[] = [];
-  const issueRows: DaySummary["issues"] = [];
-  const reworkRows: DaySummary["reworks"] = [];
-  const newWorkers: Array<{ name: string; trade?: string }> = [];
+  // کش تطبیق نام برای کاهش رفت‌وبرگشت به دیتابیس
+  const cache = new Map<string, Worker>();
+  const resolve = async (name: string): Promise<Worker> => {
+    const k = name.trim();
+    const hit = cache.get(k);
+    if (hit) return hit;
+    const w = await resolveWorker(projectId, k);
+    cache.set(k, w);
+    return w;
+  };
 
-  for (const ev of events) {
-    const p = ev.payload as unknown as ExtractedEventItem;
-    switch (ev.type) {
-      case "attendance": {
-        const name = (p.workerName || "").trim();
-        if (!name) break;
-        const rec = attByWorker.get(name) ?? {};
-        if (p.event === "ورود" && p.time) rec.entry = p.time;
-        if (p.event === "خروج" && p.time) rec.exit = p.time;
-        if (p.workFront) rec.workFront = p.workFront;
-        attByWorker.set(name, rec);
-        break;
-      }
-      case "activity": {
-        rawActivities.push({
-          workFront: p.workFront ?? null,
-          activityType: p.activityType ?? null,
-          description: p.description ?? "",
-          workers: (p.workers ?? []).map((w) => w.trim()).filter(Boolean),
-          startTime: p.startTime ?? null,
-          endTime: p.endTime ?? null,
-          isFullDay: p.isFullDay ?? false,
-        });
-        // نیروهای درگیر در فعالیت اگر در کارکرد نبودند، حاضر محسوب شوند
-        for (const w of p.workers ?? []) {
-          const nm = w.trim();
-          if (nm && !attByWorker.has(nm)) {
-            attByWorker.set(nm, { workFront: p.workFront });
-          }
-        }
-        break;
-      }
-      case "issue":
-        issueRows.push({
-          type: p.issueType ?? "مشکل",
-          description: p.description ?? "",
-          impact: p.cause ?? null,
-        });
-        break;
-      case "rework":
-        reworkRows.push({
-          workFront: p.workFront ?? null,
-          amount: p.amount ?? null,
-          cause: p.cause ?? null,
-          description: p.description ?? "",
-        });
-        break;
-      case "worker_new":
-        if (p.workerName)
-          newWorkers.push({ name: p.workerName, trade: p.trade });
-        break;
-    }
-  }
-
-  // ثبت نیروهای جدید معرفی‌شده
-  for (const nw of newWorkers) {
-    await resolveWorker(projectId, nw.name, nw.trade);
-  }
-
-  // ابتدا نام‌ها را به نیرو تبدیل و بر اساس شناسه‌ی نیرو ادغام می‌کنیم
-  // تا «آیدین/ایدین/یدین» یک ردیف واحد شوند (نه چند ردیف تکراری).
-  const byWorkerId = new Map<
+  // نیروها را بر اساس شناسه‌ی نهایی ادغام می‌کنیم (رفع نام‌های تکراری)
+  const byId = new Map<
     number,
-    { worker: Worker; entry?: string; exit?: string; workFront?: string }
+    { worker: Worker; entry?: string; exit?: string; trade?: string; emp?: string }
   >();
-  for (const [name, rec] of attByWorker) {
-    const worker = await resolveWorker(projectId, name, rec.trade);
-    const ex = byWorkerId.get(worker.id);
-    if (ex) {
-      ex.entry = ex.entry ?? rec.entry;
-      ex.exit = ex.exit ?? rec.exit;
-      ex.workFront = ex.workFront ?? rec.workFront;
-    } else {
-      byWorkerId.set(worker.id, {
-        worker,
-        entry: rec.entry,
-        exit: rec.exit,
-        workFront: rec.workFront,
-      });
+  const add = (
+    worker: Worker,
+    fields: { entry?: string; exit?: string; trade?: string; emp?: string },
+  ) => {
+    const cur = byId.get(worker.id) ?? { worker };
+    cur.entry = cur.entry ?? fields.entry;
+    cur.exit = cur.exit ?? fields.exit;
+    cur.trade = cur.trade ?? fields.trade ?? worker.trade ?? undefined;
+    cur.emp = cur.emp ?? fields.emp ?? worker.employmentType ?? undefined;
+    byId.set(worker.id, cur);
+  };
+
+  for (const w of data.workers) {
+    const name = (w.name ?? "").trim();
+    if (!name) continue;
+    if (w.trade) cache.delete(name); // تخصص جدید ممکن است
+    const worker = await resolveWorker(projectId, name, w.trade ?? undefined);
+    cache.set(name, worker);
+    add(worker, {
+      entry: w.entry ?? undefined,
+      exit: w.exit ?? undefined,
+      trade: w.trade ?? undefined,
+      emp: w.employmentType ?? undefined,
+    });
+  }
+
+  // نیروهای داخل فعالیت‌ها هم اگر در فهرست کارکرد نبودند، حاضر محسوب شوند
+  for (const a of data.activities) {
+    for (const nm of a.workers ?? []) {
+      const clean = nm.trim();
+      if (!clean) continue;
+      const worker = await resolve(clean);
+      if (!byId.has(worker.id)) add(worker, {});
     }
   }
 
-  // ساخت ردیف‌های کارکرد (یک ردیف به‌ازای هر نیرو)
-  const attendanceSummary: AttendanceRow[] = [];
-  const workedByWorkerId = new Map<number, number>();
+  // به‌روزرسانی پروفایل نیروها
+  for (const rec of byId.values()) {
+    const patch: Record<string, unknown> = {};
+    if (rec.trade) patch.trade = rec.trade;
+    if (rec.emp) patch.employmentType = rec.emp;
+    if (rec.trade && rec.emp) patch.profileStatus = "complete";
+    if (Object.keys(patch).length) {
+      await db.update(workers).set(patch).where(eq(workers.id, rec.worker.id));
+    }
+  }
 
-  for (const { worker, entry, exit, workFront } of byWorkerId.values()) {
+  // ثبت کارکرد
+  for (const rec of byId.values()) {
     let workedMinutes = 0;
     let overtimeMinutes = 0;
     let dayFraction = 0;
     let breakMinutes = 0;
-
-    if (entry && exit) {
-      const calc = calcWork(entry, exit);
-      if (calc) {
-        workedMinutes = calc.workedMinutes;
-        overtimeMinutes = calc.overtimeMinutes;
-        dayFraction = calc.dayFraction;
-        breakMinutes = calc.breakMinutes;
+    if (rec.entry && rec.exit) {
+      const c = calcWork(rec.entry, rec.exit);
+      if (c) {
+        workedMinutes = c.workedMinutes;
+        overtimeMinutes = c.overtimeMinutes;
+        dayFraction = c.dayFraction;
+        breakMinutes = c.breakMinutes;
       }
-    } else if (entry || exit) {
+    } else if (rec.entry || rec.exit) {
       dayFraction = 1;
       workedMinutes = workRules.standardWorkMinutes;
     }
-
-    workedByWorkerId.set(worker.id, workedMinutes);
-
     await db.insert(attendance).values({
       workDayId,
-      workerId: worker.id,
-      entryTime: entry ?? null,
-      exitTime: exit ?? null,
+      workerId: rec.worker.id,
+      entryTime: rec.entry ?? null,
+      exitTime: rec.exit ?? null,
       breakMinutes,
       workedMinutes,
       dayFraction,
       overtimeMinutes,
-      workFront: workFront ?? null,
-    });
-
-    attendanceSummary.push({
-      workerId: worker.id,
-      name: worker.fullName,
-      trade: worker.trade,
-      employmentType: worker.employmentType,
-      profileStatus: worker.profileStatus,
-      entry: entry ?? null,
-      exit: exit ?? null,
-      workedMinutes,
-      overtimeMinutes,
-      dayFraction,
-      workFront: workFront ?? null,
-      assignedActivityMinutes: 0,
-      hasActivity: false,
     });
   }
 
   // ثبت فعالیت‌ها + نسبت‌دادن نفرات
-  const activitySummary: ActivityRow[] = [];
-  const assignedByWorkerId = new Map<number, number>();
-  const hasActivityWorkerId = new Set<number>();
-
-  for (const a of rawActivities) {
-    const [inserted] = await db
+  for (const a of data.activities) {
+    const desc = (a.description ?? "").trim();
+    if (!desc) continue;
+    const names = (a.workers ?? []).map((x) => x.trim()).filter(Boolean);
+    const [ins] = await db
       .insert(activities)
       .values({
         workDayId,
-        workFront: a.workFront,
-        activityType: a.activityType,
-        description: a.description,
-        workerNames: a.workers,
-        startTime: a.startTime,
-        endTime: a.endTime,
-        isFullDay: a.isFullDay,
+        workFront: a.workFront ?? null,
+        activityType: a.activityType ?? null,
+        description: desc,
+        workerNames: names,
+        startTime: a.startTime ?? null,
+        endTime: a.endTime ?? null,
+        isFullDay: a.isFullDay ?? false,
       })
       .returning({ id: activities.id });
-
-    const durationMin = activityDuration(a);
-    const workerIds: number[] = [];
-
-    for (const nm of a.workers) {
-      const worker = await resolveWorker(projectId, nm);
-      workerIds.push(worker.id);
+    const seen = new Set<number>();
+    for (const nm of names) {
+      const worker = await resolve(nm);
+      if (seen.has(worker.id)) continue;
+      seen.add(worker.id);
       await db
         .insert(activityWorkers)
-        .values({ activityId: inserted.id, workerId: worker.id });
-
-      hasActivityWorkerId.add(worker.id);
-      const worked = workedByWorkerId.get(worker.id) ?? 0;
-      const prev = assignedByWorkerId.get(worker.id) ?? 0;
-      // فعالیت تمام‌روز → پوشش کامل؛ فعالیت زمان‌دار → جمع مدت
-      const add = a.isFullDay ? Math.max(worked - prev, 0) : durationMin;
-      assignedByWorkerId.set(worker.id, prev + add);
+        .values({ activityId: ins.id, workerId: worker.id });
     }
-
-    activitySummary.push({
-      activityId: inserted.id,
-      workFront: a.workFront,
-      activityType: a.activityType,
-      description: a.description,
-      workers: a.workers,
-      workerIds,
-      startTime: a.startTime,
-      endTime: a.endTime,
-      isFullDay: a.isFullDay,
-      hasTime: a.isFullDay || Boolean(a.startTime && a.endTime),
-    });
   }
 
-  // پرکردن اطلاعات پوشش در ردیف‌های کارکرد
-  for (const row of attendanceSummary) {
-    row.assignedActivityMinutes = assignedByWorkerId.get(row.workerId) ?? 0;
-    row.hasActivity = hasActivityWorkerId.has(row.workerId);
-  }
-
-  // ثبت موانع و دوباره‌کاری‌ها
-  for (const i of issueRows) {
+  // موانع و دوباره‌کاری‌ها
+  for (const i of data.issues) {
+    if (!(i.description ?? "").trim()) continue;
     await db.insert(issues).values({
       workDayId,
-      type: i.type,
+      type: i.type ?? "مشکل",
       description: i.description,
-      impact: i.impact,
+      impact: i.impact ?? null,
     });
   }
-  for (const r of reworkRows) {
+  for (const r of data.reworks) {
+    if (!(r.description ?? "").trim()) continue;
     await db.insert(reworks).values({
       workDayId,
-      workFront: r.workFront,
-      amount: r.amount,
-      cause: r.cause,
+      workFront: r.workFront ?? null,
+      amount: r.amount ?? null,
+      cause: r.cause ?? null,
       description: r.description,
     });
   }
+}
 
-  // علامت‌گذاری رویدادها به‌عنوان تجمیع‌شده
-  await db
-    .update(extractedEvents)
-    .set({ status: "consolidated" })
-    .where(eq(extractedEvents.workDayId, workDayId));
-
-  return {
-    attendance: attendanceSummary,
-    activities: activitySummary,
-    issues: issueRows,
-    reworks: reworkRows,
-    workerCount: attendanceSummary.length,
-  };
+/**
+ * سؤال‌های «حتماً لازم» را از خلاصه‌ی روز می‌سازد.
+ * تا وقتی این فهرست خالی نشود، گزارش نهایی نمی‌شود.
+ */
+export function deterministicGaps(summary: DaySummary): string[] {
+  const q: string[] = [];
+  for (const w of summary.attendance) {
+    if (w.profileStatus !== "complete") {
+      q.push(`تخصص و نوع همکاری «${w.name}» چیه؟ (مثلاً: برقکار، روزمزد)`);
+    }
+    if (!w.entry && !w.exit) {
+      q.push(`ساعت ورود و خروج «${w.name}» چند بود؟`);
+    } else if (!w.entry) {
+      q.push(`ساعت ورود «${w.name}» چند بود؟`);
+    } else if (!w.exit) {
+      q.push(`ساعت خروج «${w.name}» چند بود؟`);
+    }
+    if (!w.hasActivity) {
+      q.push(`«${w.name}» امروز چه کاری و کجا انجام داد؟`);
+    }
+  }
+  for (const a of summary.activities) {
+    if (!a.hasTime) {
+      q.push(`فعالیت «${a.description}» چه ساعتی تا چه ساعتی بود؟ (یا تمام‌روز)`);
+    }
+  }
+  return q;
 }
 
 /** مدت فعالیت زمان‌دار به دقیقه (۰ اگر بدون زمان یا تمام‌روز) */
@@ -349,10 +268,7 @@ function activityDuration(a: {
   return 0;
 }
 
-/**
- * خلاصه‌ی روز را از جدول‌های تجمیع‌شده (نه از رویدادها) می‌خواند.
- * بعد از ویزارد پایان روز استفاده می‌شود تا تغییرات دستی حفظ شوند.
- */
+/** خلاصه‌ی روز را از جدول‌های نوشته‌شده می‌خواند */
 export async function loadDaySummary(workDayId: number): Promise<DaySummary> {
   const db = getDb();
 
@@ -412,8 +328,8 @@ export async function loadDaySummary(workDayId: number): Promise<DaySummary> {
       hasActivityWorkerId.add(wid);
       const worked = workedByWorkerId.get(wid) ?? 0;
       const prev = assignedByWorkerId.get(wid) ?? 0;
-      const add = act.isFullDay ? Math.max(worked - prev, 0) : dur;
-      assignedByWorkerId.set(wid, prev + add);
+      const inc = act.isFullDay ? Math.max(worked - prev, 0) : dur;
+      assignedByWorkerId.set(wid, prev + inc);
     }
   }
 

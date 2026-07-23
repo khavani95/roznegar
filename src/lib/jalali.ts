@@ -1,4 +1,4 @@
-import { toJalaali } from "jalaali-js";
+import { toJalaali, toGregorian } from "jalaali-js";
 
 const FA_MONTHS = [
   "فروردین",
@@ -77,4 +77,35 @@ export function toJalali(date: Date = nowInTehran()): JalaliInfo {
 export function toFaDigits(input: string | number): string {
   const map = ["۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹"];
   return String(input).replace(/\d/g, (d) => map[Number(d)]);
+}
+
+/** تبدیل ارقام فارسی/عربی به لاتین */
+function toLatinDigits(s: string): string {
+  return s.replace(/[۰-۹٠-٩]/g, (d) => {
+    const c = d.charCodeAt(0);
+    if (c >= 0x06f0 && c <= 0x06f9) return String(c - 0x06f0);
+    if (c >= 0x0660 && c <= 0x0669) return String(c - 0x0660);
+    return d;
+  });
+}
+
+/** تحلیل ورودی تاریخ شمسی مثل «۱۴۰۵/۰۴/۲۸» یا «1405-4-28» */
+export function parseJalaliInput(text: string): JalaliInfo | null {
+  const nums = toLatinDigits(text).match(/\d+/g);
+  if (!nums || nums.length < 3) return null;
+  const jy = Number(nums[0]);
+  const jm = Number(nums[1]);
+  const jd = Number(nums[2]);
+  if (jy < 1300 || jy > 1500 || jm < 1 || jm > 12 || jd < 1 || jd > 31) {
+    return null;
+  }
+  const { gy, gm, gd } = toGregorian(jy, jm, jd);
+  return toJalali(new Date(gy, gm - 1, gd));
+}
+
+/** تاریخ شمسیِ n روز قبل (به وقت تهران) */
+export function jalaliDaysAgo(n: number): JalaliInfo {
+  const d = nowInTehran();
+  d.setDate(d.getDate() - n);
+  return toJalali(d);
 }

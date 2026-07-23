@@ -1,37 +1,39 @@
 import { Bot, InputFile, InlineKeyboard, type Context } from "grammy";
 import { config } from "@/lib/config";
-import { BTN, MSG, mainKeyboard } from "./text";
-import { formatAck, formatDaySummary } from "./format";
+import { BTN, MSG, mainKeyboard, reviewKeyboard } from "./text";
+import { formatDaySummary } from "./format";
 import {
   getOrCreateProject,
   getOpenWorkDay,
+  getWorkDayById,
+  getWorkDayByDate,
   startWorkDay,
-  closeWorkDay,
+  setDayStatus,
+  bumpRevision,
   listWorkers,
   saveRawMessage,
-  saveEvents,
   getConversationState,
-  setConversationState,
+  setReview,
+  setReviewQuestions,
+  setAwaitDate,
+  addAnswer,
   clearConversationState,
-  listDayActivities,
-  linkWorkerToActivity,
 } from "@/db/queries";
-import { extractEvents, transcribeAudio } from "@/ai/extract";
-import { consolidateDay, loadDaySummary } from "@/services/consolidate";
-import {
-  buildWizardQueue,
-  softWarnings,
-  questionText,
-  processAnswer,
-} from "@/services/wizard";
+import { transcribeAudio } from "@/ai/extract";
+import { runExtraction } from "@/services/review";
+import { loadDaySummary } from "@/services/consolidate";
 import { buildDailyExcel } from "@/services/report-excel";
-import { toFaDigits } from "@/lib/jalali";
-import type { ExtractedEventItem } from "@/ai/schema";
-import type { Project, WorkDay, ConversationState, WizardItem } from "@/db/schema";
+import {
+  toJalali,
+  jalaliDaysAgo,
+  parseJalaliInput,
+  toFaDigits,
+  type JalaliInfo,
+} from "@/lib/jalali";
+import type { Project, WorkDay } from "@/db/schema";
 
 let _bot: Bot | null = null;
 
-/** بات را به‌صورت تنبل می‌سازد (singleton) — مناسب سرورلس. */
 export function getBot(): Bot {
   if (_bot) return _bot;
   const bot = new Bot(config.telegram.botToken);
@@ -41,7 +43,6 @@ export function getBot(): Bot {
 }
 
 function registerHandlers(bot: Bot) {
-  // ── کنترل دسترسی ───────────────────────────────────
   bot.use(async (ctx, next) => {
     const allow = config.telegram.allowedChatIds;
     if (allow.length && ctx.chat && !allow.includes(String(ctx.chat.id))) {
@@ -51,27 +52,22 @@ function registerHandlers(bot: Bot) {
     await next();
   });
 
-  // ── /start ─────────────────────────────────────────
   bot.command("start", async (ctx) => {
+    await clearConversationState(ctx.chat.id);
     await ctx.reply(MSG.welcome, { reply_markup: mainKeyboard() });
   });
 
-  // ── شروع روز ───────────────────────────────────────
+  // ── شروع روز → انتخاب تاریخ ─────────────────────────
   bot.hears(BTN.startDay, async (ctx) => {
-    const project = await getOrCreateProject(ctx.chat.id);
-    const open = await getOpenWorkDay(project.id);
-    if (open) {
-      await ctx.reply(MSG.dayAlreadyOpen(open.dateLabel));
-      return;
-    }
-    const day = await startWorkDay(project);
-    await clearConversationState(ctx.chat.id);
-    await ctx.reply(MSG.dayStarted(day.dateLabel, day.reportNo ?? "-"), {
-      reply_markup: mainKeyboard(),
-    });
+    const kb = new InlineKeyboard()
+      .text("📅 امروز", "d:today")
+      .text("📅 دیروز", "d:yesterday")
+      .row()
+      .text("✏️ تاریخ دیگر", "d:custom");
+    await ctx.reply("گزارش برای چه روزی ثبت شود؟", { reply_markup: kb });
   });
 
-  // ── گزارش امروز (پیش‌نمایش) ─────────────────────────
+  // ── گزارش امروز (پیش‌نمایش، بدون تغییر وضعیت) ────────
   bot.hears(BTN.todayReport, async (ctx) => {
     const project = await getOrCreateProject(ctx.chat.id);
     const day = await getOpenWorkDay(project.id);
@@ -80,8 +76,14 @@ function registerHandlers(bot: Bot) {
       return;
     }
     await ctx.reply(MSG.processing);
-    const summary = await consolidateDay(project.id, day.id);
-    await ctx.reply(formatDaySummary(day, summary));
+    const res = await runExtraction(project.id, day.id);
+    await ctx.reply(formatDaySummary(day, res.summary));
+    if (res.questions.length) {
+      await ctx.reply(
+        "⚠️ موارد ناقص (آخر روز پرسیده می‌شوند):\n" +
+          numbered(res.questions),
+      );
+    }
   });
 
   // ── فهرست نیروها ───────────────────────────────────
@@ -99,12 +101,11 @@ function registerHandlers(bot: Bot) {
     });
     await ctx.reply(
       `👷 نیروهای کارگاه (${toFaDigits(workers.length)}):\n\n` +
-        lines.join("\n") +
-        `\n\n⚠️ = پروفایل ناقص`,
+        lines.join("\n"),
     );
   });
 
-  // ── پایان روز ──────────────────────────────────────
+  // ── پایان روز → شروع بازبینی ────────────────────────
   bot.hears(BTN.endDay, async (ctx) => {
     const project = await getOrCreateProject(ctx.chat.id);
     const day = await getOpenWorkDay(project.id);
@@ -112,228 +113,240 @@ function registerHandlers(bot: Bot) {
       await ctx.reply(MSG.noOpenDay);
       return;
     }
-
-    // اگر وسط ویزارد هستیم، «پایان روز» یعنی «همین حالا نهایی کن»
-    const state = await getConversationState(ctx.chat.id);
-    if (state?.phase === "wizard") {
-      await ctx.reply("در حال نهایی‌سازی (موارد باقی‌مانده رد می‌شوند)…");
-      await finalizeDay(bot, ctx, project, day);
-      return;
-    }
-
-    await ctx.reply(MSG.processing);
-    const summary = await consolidateDay(project.id, day.id);
-    const warns = softWarnings(summary);
-    const queue = buildWizardQueue(summary);
-
-    if (queue.length === 0) {
-      if (warns.length) await ctx.reply(warns.join("\n"));
-      await finalizeDay(bot, ctx, project, day);
-      return;
-    }
-
-    await setConversationState(ctx.chat.id, day.id, "wizard", queue);
-    let intro = `📝 قبل از ثبت نهایی، ${toFaDigits(queue.length)} مورد باید کامل شود:`;
-    if (warns.length) intro += "\n\n" + warns.join("\n");
-    await ctx.reply(intro);
-    await askItem(ctx, queue[0], day.id);
+    await beginReview(bot, ctx, project, day);
   });
 
-  // ── انتخاب فعالیت با دکمه (مرحله‌ی پوشش ویزارد) ─────
+  // ── ثبت نهایی (در مرحله‌ی بازبینی) ──────────────────
+  bot.hears(BTN.finalize, async (ctx) => {
+    const project = await getOrCreateProject(ctx.chat.id);
+    const state = await getConversationState(ctx.chat.id);
+    if (state?.phase !== "review" || !state.workDayId) {
+      await ctx.reply("چیزی برای ثبت نهایی نیست.", {
+        reply_markup: mainKeyboard(),
+      });
+      return;
+    }
+    const day = await getWorkDayById(state.workDayId);
+    if (!day) return;
+
+    await ctx.reply(MSG.processing);
+    const answers = state.answers ?? [];
+
+    // بدون پاسخ جدید → همین‌طور نهایی کن؛ با پاسخ → دوباره بررسی
+    if (answers.length === 0) {
+      await finalize(bot, ctx, project, day);
+      return;
+    }
+
+    const res = await runExtraction(project.id, day.id, {
+      questions: state.questions ?? [],
+      answers,
+    });
+    await ctx.reply(formatDaySummary(day, res.summary));
+    if (res.complete) {
+      await finalize(bot, ctx, project, day);
+    } else {
+      // پاسخ‌های قبلی حفظ می‌شوند تا از دست نروند
+      await setReviewQuestions(ctx.chat.id, res.questions, (state.round ?? 1) + 1);
+      await ctx.reply(
+        "چند مورد هنوز مونده — جواب بده بعد دوباره «✅ ثبت نهایی»:\n\n" +
+          numbered(res.questions),
+        { reply_markup: reviewKeyboard() },
+      );
+    }
+  });
+
+  // ── لغو بازبینی ────────────────────────────────────
+  bot.hears(BTN.cancel, async (ctx) => {
+    const state = await getConversationState(ctx.chat.id);
+    if (state?.phase === "review" && state.workDayId) {
+      await setDayStatus(state.workDayId, "open");
+    }
+    await clearConversationState(ctx.chat.id);
+    await ctx.reply("لغو شد. روز باز است.", { reply_markup: mainKeyboard() });
+  });
+
+  // ── انتخاب تاریخ (callback) ─────────────────────────
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
-    const chatId = ctx.chat?.id;
-    if (!chatId) {
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    const state = await getConversationState(chatId);
-    if (!state || state.phase !== "wizard" || !state.queue.length) {
-      await ctx.answerCallbackQuery({ text: "این مورد منقضی شده." });
-      return;
-    }
-    const item = state.queue[0];
-    const parts = data.split(":"); // wz:cov:<workerId>:<activityId> | wz:skip:<workerId>
-    if (item.kind !== "coverage" || Number(parts[2]) !== item.workerId) {
-      await ctx.answerCallbackQuery({ text: "مربوط به مورد دیگری است." });
-      return;
-    }
-
+    const project = await getOrCreateProject(ctx.chat!.id);
     await ctx.answerCallbackQuery();
     try {
       await ctx.editMessageReplyMarkup();
     } catch {
-      // بی‌اهمیت
+      /* بی‌اهمیت */
     }
 
-    const project = await getOrCreateProject(chatId);
-    const day = await getOpenWorkDay(project.id);
-    if (!day) {
-      await ctx.reply(MSG.noOpenDay);
-      return;
+    if (data === "d:today") {
+      await startDayForDate(ctx, project, toJalali());
+    } else if (data === "d:yesterday") {
+      await startDayForDate(ctx, project, jalaliDaysAgo(1));
+    } else if (data === "d:custom") {
+      await setAwaitDate(ctx.chat!.id);
+      await ctx.reply("تاریخ شمسی را بفرست، مثل: ۱۴۰۵/۰۴/۲۸");
     }
-    const workDayId = state.workDayId ?? day.id;
-
-    if (parts[1] === "skip") {
-      await ctx.reply("رد شد.");
-    } else if (parts[1] === "cov") {
-      await linkWorkerToActivity(Number(parts[3]), item.workerId!);
-      await ctx.reply(`✅ «${item.label}» به فعالیت وصل شد.`);
-    }
-    await advanceWizard(bot, ctx, project, day, state.queue.slice(1), workDayId);
   });
 
-  // ── پیام صوتی ──────────────────────────────────────
+  // ── ویس ────────────────────────────────────────────
   bot.on(["message:voice", "message:audio"], async (ctx) => {
     const project = await getOrCreateProject(ctx.chat.id);
-    const day = await getOpenWorkDay(project.id);
-    if (!day) {
-      await ctx.reply(MSG.noOpenDay);
-      return;
-    }
-
     try {
       const file = await ctx.getFile();
       const url = `https://api.telegram.org/file/bot${config.telegram.botToken}/${file.file_path}`;
       const res = await fetch(url);
-      const audioBase64 = Buffer.from(await res.arrayBuffer()).toString("base64");
-
-      const state = await getConversationState(ctx.chat.id);
-      if (state?.phase === "wizard" && state.queue.length) {
-        const answer = await transcribeAudio(audioBase64);
-        await handleWizardAnswer(bot, ctx, project, day, state, answer);
-        return;
-      }
-
-      const known = (await listWorkers(project.id)).map((w) => w.fullName);
-      const { events, transcript } = await extractEvents({
-        audioBase64,
-        audioMimeType: "audio/ogg",
-        knownWorkers: known,
-      });
-      await persist(day.id, ctx.message?.message_id, "voice", events, {
+      const b64 = Buffer.from(await res.arrayBuffer()).toString("base64");
+      const text = await transcribeAudio(b64);
+      await routeMessage(bot, ctx, project, text, {
+        kind: "voice",
         telegramFileId: file.file_id,
-        transcript,
       });
-      await ctx.reply(formatAck(events));
     } catch (e) {
-      console.error("voice handling error:", e);
+      console.error("voice error:", e);
       await ctx.reply(MSG.error);
     }
   });
 
-  // ── پیام متنی ──────────────────────────────────────
+  // ── متن ────────────────────────────────────────────
   bot.on("message:text", async (ctx) => {
     const project = await getOrCreateProject(ctx.chat.id);
-    const day = await getOpenWorkDay(project.id);
-    if (!day) {
-      await ctx.reply(MSG.noOpenDay);
-      return;
-    }
-
     try {
-      const text = ctx.message.text;
-
-      const state = await getConversationState(ctx.chat.id);
-      if (state?.phase === "wizard" && state.queue.length) {
-        await handleWizardAnswer(bot, ctx, project, day, state, text);
-        return;
-      }
-
-      const known = (await listWorkers(project.id)).map((w) => w.fullName);
-      const { events } = await extractEvents({ text, knownWorkers: known });
-      await persist(day.id, ctx.message.message_id, "text", events, { text });
-      await ctx.reply(formatAck(events));
+      await routeMessage(bot, ctx, project, ctx.message.text, {
+        kind: "text",
+        telegramMessageId: ctx.message.message_id,
+      });
     } catch (e) {
-      console.error("text handling error:", e);
+      console.error("text error:", e);
       await ctx.reply(MSG.error);
     }
   });
 }
 
-/** نمایش یک آیتم ویزارد؛ برای «پوشش» دکمه‌های انتخاب فعالیت نشان می‌دهد */
-async function askItem(ctx: Context, item: WizardItem, workDayId: number) {
-  if (item.kind !== "coverage") {
-    await ctx.reply(questionText(item));
+/** مسیر‌دهی یک پیام بر اساس فاز فعلی (تاریخ / بازبینی / جمع‌آوری) */
+async function routeMessage(
+  bot: Bot,
+  ctx: Context,
+  project: Project,
+  text: string,
+  meta: {
+    kind: "text" | "voice";
+    telegramMessageId?: number;
+    telegramFileId?: string;
+  },
+) {
+  const chatId = ctx.chat!.id;
+  const state = await getConversationState(chatId);
+
+  // منتظر ورودی تاریخ
+  if (state?.phase === "await_date") {
+    const j = parseJalaliInput(text);
+    if (!j) {
+      await ctx.reply("تاریخ را درست بفرست، مثل: ۱۴۰۵/۰۴/۲۸");
+      return;
+    }
+    await startDayForDate(ctx, project, j);
     return;
   }
 
-  const acts = await listDayActivities(workDayId);
-  const kb = new InlineKeyboard();
-  for (const a of acts) {
-    const raw = a.workFront ? `${a.workFront} — ${a.description}` : a.description;
-    kb.text(truncate(raw, 45), `wz:cov:${item.workerId}:${a.id}`).row();
-  }
-  kb.text("رد کردن", `wz:skip:${item.workerId}`);
-
-  const head = acts.length
-    ? `🏗️ «${item.label}» کدام فعالیت را انجام داد؟\n` +
-      `یکی را انتخاب کن، یا فعالیت جدیدی تایپ کن (مثلاً: «بتن‌ریزی طبقه ۲، تمام‌روز»).`
-    : `🏗️ «${item.label}» امروز چه کاری و کجا انجام داد؟\n` +
-      `مثال: «آرماتوربندی طبقه ۳، از ۸ تا ۴» (یا بنویس: رد)`;
-  await ctx.reply(head, { reply_markup: kb });
-}
-
-/** رفتن به آیتم بعدی ویزارد یا نهایی‌سازی روز */
-async function advanceWizard(
-  bot: Bot,
-  ctx: Context,
-  project: Project,
-  day: WorkDay,
-  rest: WizardItem[],
-  workDayId: number,
-) {
-  if (rest.length) {
-    await setConversationState(ctx.chat!.id, workDayId, "wizard", rest);
-    await ctx.reply(`(باقی‌مانده: ${toFaDigits(rest.length)})`);
-    await askItem(ctx, rest[0], workDayId);
-  } else {
-    await ctx.reply("✅ همه‌ی موارد کامل شد. در حال ساخت گزارش…");
-    await finalizeDay(bot, ctx, project, day);
-  }
-}
-
-/** پردازش یک پاسخ متنی/صوتی در ویزارد و رفتن به مرحله‌ی بعد */
-async function handleWizardAnswer(
-  bot: Bot,
-  ctx: Context,
-  project: Project,
-  day: WorkDay,
-  state: ConversationState,
-  answerText: string,
-) {
-  const queue = state.queue;
-  const item = queue[0];
-  const workDayId = state.workDayId ?? day.id;
-
-  const res = await processAnswer(item, answerText, workDayId);
-  await ctx.reply(res.note);
-
-  // اگر پاسخ فهمیده نشد و رد هم نکرد، همان سؤال دوباره پرسیده شود
-  if (!res.ok && !res.skipped) {
-    await askItem(ctx, item, workDayId);
+  // در حال پاسخ به سؤالات بازبینی
+  if (state?.phase === "review") {
+    await addAnswer(chatId, text);
+    await ctx.reply(
+      "✅ پاسخت ثبت شد. وقتی همه رو گفتی «✅ ثبت نهایی» رو بزن.",
+    );
     return;
   }
 
-  await advanceWizard(bot, ctx, project, day, queue.slice(1), workDayId);
+  // جمع‌آوری پیام‌های روز
+  const day = await getOpenWorkDay(project.id);
+  if (!day) {
+    await ctx.reply(MSG.noOpenDay);
+    return;
+  }
+  await saveRawMessage({
+    workDayId: day.id,
+    telegramMessageId: meta.telegramMessageId,
+    kind: meta.kind,
+    text: meta.kind === "text" ? text : undefined,
+    transcript: meta.kind === "voice" ? text : undefined,
+    telegramFileId: meta.telegramFileId,
+  });
+  await ctx.reply(MSG.saved);
 }
 
-/** ساخت و ارسال گزارش نهایی، بستن روز و پاک‌کردن وضعیت */
-async function finalizeDay(
+/** ساخت یا بازکردن روز برای یک تاریخ */
+async function startDayForDate(
+  ctx: Context,
+  project: Project,
+  j: JalaliInfo,
+) {
+  const chatId = ctx.chat!.id;
+  await clearConversationState(chatId);
+
+  const existing = await getWorkDayByDate(project.id, j.key);
+  if (existing) {
+    if (existing.status === "closed") {
+      await setDayStatus(existing.id, "open");
+      await ctx.reply(MSG.dayReopened(existing.dateLabel), {
+        reply_markup: mainKeyboard(),
+      });
+    } else {
+      await ctx.reply(MSG.dayReopened(existing.dateLabel), {
+        reply_markup: mainKeyboard(),
+      });
+    }
+    return;
+  }
+
+  const day = await startWorkDay(project, j);
+  await ctx.reply(MSG.dayStarted(day.dateLabel, day.reportNo ?? "-"), {
+    reply_markup: mainKeyboard(),
+  });
+}
+
+/** شروع مرحله‌ی بازبینی: استخراج کل روز + طرح سؤال‌ها */
+async function beginReview(
   bot: Bot,
   ctx: Context,
   project: Project,
   day: WorkDay,
 ) {
-  const summary = await loadDaySummary(day.id);
-  await ctx.reply(formatDaySummary(day, summary));
+  await ctx.reply(MSG.processing);
+  const res = await runExtraction(project.id, day.id);
+  await setDayStatus(day.id, "review");
+  await ctx.reply(formatDaySummary(day, res.summary));
 
-  const buffer = await buildDailyExcel(project, day, summary);
-  const filename = `roznegar-${day.jalaliDate.replace(/\//g, "-")}.xlsx`;
+  if (res.complete) {
+    await finalize(bot, ctx, project, day);
+    return;
+  }
+  await setReview(ctx.chat!.id, day.id, res.questions, 1);
+  await ctx.reply(
+    "📝 برای کامل‌شدن گزارش، این‌ها رو جواب بده (هرچند تا با هم، متن یا ویس)، " +
+      "بعد «✅ ثبت نهایی» رو بزن:\n\n" +
+      numbered(res.questions),
+    { reply_markup: reviewKeyboard() },
+  );
+}
+
+/** نهایی‌سازی: نسخه‌ی جدید + اکسل + بستن روز */
+async function finalize(
+  bot: Bot,
+  ctx: Context,
+  project: Project,
+  day: WorkDay,
+) {
+  const rev = await bumpRevision(day.id);
+  const dayForReport: WorkDay = { ...day, revision: rev };
+
+  // خلاصه‌ی نهایی از دیتابیس (بدون فراخوانی مجدد AI)
+  const finalSummary = await loadDaySummary(day.id);
+
+  const buffer = await buildDailyExcel(project, dayForReport, finalSummary);
+  const revTag = `-rev${String(rev).padStart(2, "0")}`;
+  const filename = `roznegar-${day.jalaliDate.replace(/\//g, "-")}${revTag}.xlsx`;
 
   await ctx.replyWithDocument(new InputFile(buffer, filename), {
-    caption: `📊 گزارش استاندارد ${day.dateLabel}`,
+    caption: `📊 گزارش استاندارد ${day.dateLabel} (${day.reportNo}${revTag})`,
   });
 
   if (config.telegram.backupChannelId) {
@@ -341,47 +354,19 @@ async function finalizeDay(
       await bot.api.sendDocument(
         config.telegram.backupChannelId,
         new InputFile(buffer, filename),
-        { caption: `📊 بک‌آپ گزارش ${day.dateLabel} — ${project.name}` },
+        { caption: `📊 بک‌آپ ${day.dateLabel} — ${project.name}${revTag}` },
       );
     } catch (e) {
-      console.error("backup channel send failed:", e);
+      console.error("backup send failed:", e);
     }
   }
 
-  await closeWorkDay(day.id);
+  await setDayStatus(day.id, "closed");
   await clearConversationState(ctx.chat!.id);
-  await ctx.reply("✅ روز بسته شد و گزارش ذخیره گردید.", {
-    reply_markup: mainKeyboard(),
-  });
+  await ctx.reply("✅ گزارش نهایی ثبت شد.", { reply_markup: mainKeyboard() });
 }
 
-/** ذخیره‌ی پیام خام + رویدادهای استخراج‌شده */
-async function persist(
-  workDayId: number,
-  telegramMessageId: number | undefined,
-  kind: "text" | "voice",
-  events: ExtractedEventItem[],
-  extra: { text?: string; transcript?: string; telegramFileId?: string },
-) {
-  const raw = await saveRawMessage({
-    workDayId,
-    telegramMessageId,
-    kind,
-    text: extra.text,
-    transcript: extra.transcript,
-    telegramFileId: extra.telegramFileId,
-  });
-  await saveEvents(
-    workDayId,
-    raw.id,
-    events.map((e) => ({
-      type: e.type,
-      payload: e as unknown as Record<string, unknown>,
-    })),
-  );
-}
-
-/** کوتاه‌کردن متن دکمه */
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+/** فهرست شماره‌دار فارسی */
+function numbered(items: string[]): string {
+  return items.map((q, i) => `${toFaDigits(i + 1)}. ${q}`).join("\n");
 }

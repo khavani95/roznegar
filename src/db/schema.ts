@@ -57,8 +57,9 @@ export const workDays = pgTable(
       .references(() => projects.id),
     jalaliDate: text("jalali_date").notNull(), // 1403/04/30
     dateLabel: text("date_label").notNull(), // شنبه ۳۰ تیر ۱۴۰۳
-    reportNo: text("report_no"),
-    status: text("status").notNull().default("open"), // open | closed
+    reportNo: text("report_no"), // تاریخ‌محور مثل RN-14050430
+    revision: integer("revision").notNull().default(0), // شماره‌ی بازتولید (rev)
+    status: text("status").notNull().default("open"), // open | review | closed
     weather: text("weather"),
     startedAt: timestamp("started_at").notNull().defaultNow(),
     closedAt: timestamp("closed_at"),
@@ -173,27 +174,18 @@ export const activityWorkers = pgTable(
 );
 
 /**
- * وضعیت گفتگو برای «ویزارد کنترل پایان روز».
- * چون Vercel بی‌حالت است، وضعیت سؤال‌های تعاملی اینجا نگه داشته می‌شود.
+ * وضعیت گفتگوی «بازبینی پایان روز».
+ * سوال‌های دور فعلی و پاسخ‌های جمع‌شده تا فشردن «ثبت نهایی».
  */
 export const conversationState = pgTable("conversation_state", {
   chatId: bigint("chat_id", { mode: "number" }).primaryKey(),
   workDayId: integer("work_day_id").references(() => workDays.id),
-  phase: text("phase").notNull().default("idle"), // idle | wizard
-  queue: jsonb("queue").$type<WizardItem[]>().notNull().default([]),
+  phase: text("phase").notNull().default("idle"), // idle | review
+  questions: jsonb("questions").$type<string[]>().notNull().default([]),
+  answers: jsonb("answers").$type<string[]>().notNull().default([]),
+  round: integer("round").notNull().default(0),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
-
-/** یک سؤال معلق در ویزارد پایان روز */
-export interface WizardItem {
-  kind: "profile" | "attendance_time" | "activity_time" | "coverage";
-  workerId?: number;
-  workerName?: string;
-  activityId?: number;
-  entry?: string | null; // ساعت ورودِ موجود (برای attendance_time)
-  exit?: string | null; // ساعت خروجِ موجود (برای attendance_time)
-  label: string; // توضیح انسانی برای طرح سؤال
-}
 
 /**
  * موانع، مشکلات و تأخیرات.
