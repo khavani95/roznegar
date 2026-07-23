@@ -6,6 +6,8 @@ export const BTN = {
   endDay: "⏹️ پایان روز",
   workers: "👷 نیروها",
   todayReport: "📊 گزارش امروز",
+  projects: "📁 پروژه‌ها",
+  newProject: "➕ پروژه جدید",
   finalize: "✅ ثبت نهایی",
   cancel: "✖️ لغو",
 } as const;
@@ -18,11 +20,14 @@ export function mainKeyboard() {
     .row()
     .text(BTN.todayReport)
     .text(BTN.workers)
+    .row()
+    .text(BTN.projects)
+    .text(BTN.newProject)
     .resized()
     .persistent();
 }
 
-/** صفحه‌کلید مرحله‌ی بازبینی (پاسخ به سؤالات) */
+/** صفحه‌کلید مرحله‌ی بازبینی */
 export function reviewKeyboard() {
   return new Keyboard()
     .text(BTN.finalize)
@@ -34,23 +39,31 @@ export function reviewKeyboard() {
 export const MSG = {
   welcome:
     "به روزنگار خوش آمدی 👷‍♂️\n\n" +
-    "دستیار هوشمند گزارش روزانه‌ی کارگاه.\n\n" +
-    "۱) دکمه‌ی «▶️ شروع روز» را بزن و تاریخ را انتخاب کن.\n" +
-    "۲) در طول روز، گزارش‌ها را با متن یا ویس بفرست (فقط ذخیره می‌شوند).\n" +
-    "۳) آخر روز «⏹️ پایان روز» را بزن؛ دستیار کل روز را می‌خواند، چند سؤال " +
-    "می‌پرسد، جواب می‌دهی و با «✅ ثبت نهایی» گزارش استاندارد ساخته می‌شود.",
+    "دستیار هوشمند گزارش روزانه‌ی کارگاه (چندپروژه‌ای).\n\n" +
+    "۱) با «➕ پروژه جدید» پروژه‌هایت را بساز.\n" +
+    "۲) از «📁 پروژه‌ها» پروژه‌ی موردنظر را انتخاب کن.\n" +
+    "۳) «▶️ شروع روز» → گزارش‌ها را با متن یا ویس بفرست.\n" +
+    "۴) «⏹️ پایان روز» → دستیار سؤال می‌پرسد، جواب می‌دهی، تأیید می‌کنی.",
 
-  noOpenDay: "هنوز روزی باز نیست. اول دکمه‌ی «▶️ شروع روز» را بزن.",
+  selectProjectFirst:
+    "اول یک پروژه انتخاب کن یا بساز:\n«📁 پروژه‌ها» یا «➕ پروژه جدید».",
 
-  dayStarted: (label: string, reportNo: string) =>
-    `✅ روز کاری باز شد.\n📅 ${label}\n🔖 ${reportNo}\n\n` +
-    "حالا گزارش‌هایت را با متن یا ویس بفرست. (فقط ذخیره می‌شوند تا پایان روز)",
+  noProjects: "هنوز پروژه‌ای نساختی. «➕ پروژه جدید» را بزن.",
+  askProjectName: "نام پروژه‌ی جدید را بفرست:",
+  projectCreated: (name: string) => `✅ پروژه «${name}» ساخته و فعال شد.`,
+  projectSelected: (name: string) => `📁 پروژه‌ی فعال: «${name}»`,
 
-  dayReopened: (label: string) =>
-    `🔓 روز «${label}» دوباره باز شد برای ویرایش. پیام‌های جدید را بفرست، ` +
-    "بعد «⏹️ پایان روز» را بزن.",
+  noOpenDay: (name: string) =>
+    `برای پروژه‌ی «${name}» روزی باز نیست. «▶️ شروع روز» را بزن.`,
 
-  saved: "✅ ثبت شد.",
+  dayStarted: (project: string, label: string, reportNo: string) =>
+    `✅ روز باز شد.\n📁 ${project}\n📅 ${label}\n🔖 ${reportNo}\n\n` +
+    "گزارش‌هایت را با متن یا ویس بفرست.",
+
+  dayReopened: (project: string, label: string) =>
+    `🔓 روز «${label}» پروژه‌ی «${project}» دوباره باز شد. پیام‌ها را بفرست.`,
+
+  saved: (name: string) => `✅ ثبت شد (پروژه: ${name}).`,
 
   notAllowed: "⛔️ دسترسی مجاز نیست.",
   noWorkers: "هنوز نیرویی ثبت نشده.",

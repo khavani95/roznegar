@@ -35,6 +35,7 @@ CREATE TABLE "attendance" (
 --> statement-breakpoint
 CREATE TABLE "conversation_state" (
 	"chat_id" bigint PRIMARY KEY NOT NULL,
+	"active_project_id" integer,
 	"work_day_id" integer,
 	"phase" text DEFAULT 'idle' NOT NULL,
 	"questions" jsonb DEFAULT '[]'::jsonb NOT NULL,
@@ -67,9 +68,9 @@ CREATE TABLE "projects" (
 	"chat_id" bigint NOT NULL,
 	"name" text DEFAULT 'کارگاه' NOT NULL,
 	"report_prefix" text DEFAULT 'RN' NOT NULL,
+	"is_archived" boolean DEFAULT false NOT NULL,
 	"settings" jsonb DEFAULT '{}'::jsonb,
-	"created_at" timestamp DEFAULT now() NOT NULL,
-	CONSTRAINT "projects_chat_id_unique" UNIQUE("chat_id")
+	"created_at" timestamp DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "raw_messages" (
@@ -137,6 +138,7 @@ CREATE INDEX "activity_workers_idx" ON "activity_workers" USING btree ("activity
 CREATE INDEX "attendance_day_idx" ON "attendance" USING btree ("work_day_id");--> statement-breakpoint
 CREATE INDEX "events_day_idx" ON "extracted_events" USING btree ("work_day_id","type");--> statement-breakpoint
 CREATE INDEX "issues_day_idx" ON "issues" USING btree ("work_day_id");--> statement-breakpoint
+CREATE INDEX "projects_chat_idx" ON "projects" USING btree ("chat_id");--> statement-breakpoint
 CREATE INDEX "raw_messages_day_idx" ON "raw_messages" USING btree ("work_day_id");--> statement-breakpoint
 CREATE INDEX "reworks_day_idx" ON "reworks" USING btree ("work_day_id");--> statement-breakpoint
 CREATE INDEX "work_days_project_idx" ON "work_days" USING btree ("project_id","status");--> statement-breakpoint

@@ -1,5 +1,5 @@
 {
-  "id": "0fa815dd-90c1-441d-979b-280fdc19ba38",
+  "id": "892212b1-b8e2-41ad-89fe-33669439ce04",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -333,6 +333,12 @@
           "primaryKey": true,
           "notNull": true
         },
+        "active_project_id": {
+          "name": "active_project_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "work_day_id": {
           "name": "work_day_id",
           "type": "integer",
@@ -614,6 +620,13 @@
           "notNull": true,
           "default": "'RN'"
         },
+        "is_archived": {
+          "name": "is_archived",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "settings": {
           "name": "settings",
           "type": "jsonb",
@@ -629,18 +642,26 @@
           "default": "now()"
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "projects_chat_id_unique": {
-          "name": "projects_chat_id_unique",
-          "nullsNotDistinct": false,
+      "indexes": {
+        "projects_chat_idx": {
+          "name": "projects_chat_idx",
           "columns": [
-            "chat_id"
-          ]
+            {
+              "expression": "chat_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

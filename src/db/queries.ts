@@ -19,21 +19,68 @@ import { toJalali, type JalaliInfo } from "@/lib/jalali";
 import { calcWork } from "@/services/attendance-calc";
 import { namesMatch } from "@/lib/text-normalize";
 
-/** پروژه‌ی متناظر با یک چت تلگرام را می‌گیرد یا می‌سازد */
-export async function getOrCreateProject(chatId: number): Promise<Project> {
+/** ساخت پروژه‌ی جدید برای یک چت */
+export async function createProject(
+  chatId: number,
+  name: string,
+): Promise<Project> {
   const db = getDb();
-  const existing = await db
-    .select()
-    .from(projects)
-    .where(eq(projects.chatId, chatId))
-    .limit(1);
-  if (existing[0]) return existing[0];
-
   const inserted = await db
     .insert(projects)
-    .values({ chatId })
+    .values({ chatId, name: name.trim() || "کارگاه" })
     .returning();
   return inserted[0];
+}
+
+/** فهرست پروژه‌های فعالِ یک چت */
+export async function listProjects(chatId: number): Promise<Project[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(projects)
+    .where(and(eq(projects.chatId, chatId), eq(projects.isArchived, false)))
+    .orderBy(projects.createdAt);
+}
+
+export async function getProjectById(id: number): Promise<Project | null> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, id))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/** پروژه‌ی فعالِ فعلیِ چت (اگر انتخاب شده باشد) */
+export async function getActiveProject(chatId: number): Promise<Project | null> {
+  const st = await getConversationState(chatId);
+  if (!st?.activeProjectId) return null;
+  return getProjectById(st.activeProjectId);
+}
+
+/** تعیین پروژه‌ی فعالِ چت */
+export async function setActiveProject(chatId: number, projectId: number) {
+  const db = getDb();
+  await db
+    .insert(conversationState)
+    .values({ chatId, activeProjectId: projectId, phase: "idle" })
+    .onConflictDoUpdate({
+      target: conversationState.chatId,
+      set: { activeProjectId: projectId, updatedAt: new Date() },
+    });
+}
+
+/** گذاشتن فاز «منتظر نام پروژه» */
+export async function setAwaitProjectName(chatId: number) {
+  const db = getDb();
+  await db
+    .insert(conversationState)
+    .values({ chatId, phase: "await_project_name" })
+    .onConflictDoUpdate({
+      target: conversationState.chatId,
+      set: { phase: "await_project_name", updatedAt: new Date() },
+    });
 }
 
 /** روزکاریِ بازِ فعلی این پروژه (اگر باشد) */
@@ -402,6 +449,18 @@ export async function setReview(
         round,
         updatedAt: new Date(),
       },
+    });
+}
+
+/** گذاشتن فاز «تأیید نهایی» */
+export async function setConfirm(chatId: number, workDayId: number) {
+  const db = getDb();
+  await db
+    .insert(conversationState)
+    .values({ chatId, workDayId, phase: "confirm" })
+    .onConflictDoUpdate({
+      target: conversationState.chatId,
+      set: { workDayId, phase: "confirm", updatedAt: new Date() },
     });
 }
 
