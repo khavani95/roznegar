@@ -94,32 +94,36 @@ async function aiExtractText(
   knownWorkers?: string[],
 ): Promise<ExtractedEventItem[]> {
   if (!text.trim()) return [];
-  const ai = getGemini();
 
   const knownList =
     knownWorkers && knownWorkers.length
       ? `\n\nنیروهای شناخته‌شده‌ی این کارگاه: ${knownWorkers.join("، ")}.\nاگر نامی نزدیک به این‌هاست، همان نام استاندارد را برگردان.`
       : "";
 
-  const response = await ai.models.generateContent({
-    model: config.gemini.model,
-    contents: [
-      { role: "user", parts: [{ text: `پیام سرکارگر:\n${text}${knownList}` }] },
-    ],
-    config: {
-      systemInstruction: SYSTEM_INSTRUCTION,
-      responseMimeType: "application/json",
-      responseSchema: extractionResponseSchema,
-      temperature: 0,
-    },
-  });
-
   try {
+    const ai = getGemini();
+    const response = await ai.models.generateContent({
+      model: config.gemini.model,
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: `پیام سرکارگر:\n${text}${knownList}` }],
+        },
+      ],
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        responseMimeType: "application/json",
+        responseSchema: extractionResponseSchema,
+        temperature: 0,
+      },
+    });
     const parsed = JSON.parse(response.text ?? "{}") as {
       events?: ExtractedEventItem[];
     };
     return parsed.events ?? [];
-  } catch {
+  } catch (e) {
+    // خطای API (سهمیه/شبکه) نباید کل پیام را خراب کند؛ پارسر قطعی جبران می‌کند
+    console.error("aiExtractText failed:", e);
     return [];
   }
 }
@@ -161,23 +165,28 @@ export async function transcribeAudio(
   audioBase64: string,
   mimeType = "audio/ogg",
 ): Promise<string> {
-  const ai = getGemini();
-  const response = await ai.models.generateContent({
-    model: config.gemini.model,
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { inlineData: { mimeType, data: audioBase64 } },
-          {
-            text: "این پیام صوتی فارسی را دقیق و کلمه‌به‌کلمه به متن فارسی تبدیل کن. فقط متن را برگردان.",
-          },
-        ],
-      },
-    ],
-    config: { temperature: 0 },
-  });
-  return (response.text ?? "").trim();
+  try {
+    const ai = getGemini();
+    const response = await ai.models.generateContent({
+      model: config.gemini.model,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inlineData: { mimeType, data: audioBase64 } },
+            {
+              text: "این پیام صوتی فارسی را دقیق و کلمه‌به‌کلمه به متن فارسی تبدیل کن. فقط متن را برگردان.",
+            },
+          ],
+        },
+      ],
+      config: { temperature: 0 },
+    });
+    return (response.text ?? "").trim();
+  } catch (e) {
+    console.error("transcribeAudio failed:", e);
+    return "";
+  }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -189,19 +198,20 @@ async function parseWithSchema<T>(
   prompt: string,
   schema: Record<string, unknown>,
 ): Promise<T> {
-  const ai = getGemini();
-  const response = await ai.models.generateContent({
-    model: config.gemini.model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: schema,
-      temperature: 0,
-    },
-  });
   try {
+    const ai = getGemini();
+    const response = await ai.models.generateContent({
+      model: config.gemini.model,
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: schema,
+        temperature: 0,
+      },
+    });
     return JSON.parse(response.text ?? "{}") as T;
-  } catch {
+  } catch (e) {
+    console.error("parseWithSchema failed:", e);
     return {} as T;
   }
 }

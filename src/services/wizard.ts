@@ -5,6 +5,7 @@ import {
   parseActivityTime,
   parseCoverageActivity,
   parseEntryExit,
+  type ProfileAnswer,
 } from "@/ai/extract";
 import {
   updateWorkerProfile,
@@ -13,8 +14,46 @@ import {
   addCoverageActivity,
 } from "@/db/queries";
 import { humanDuration } from "./attendance-calc";
+import { parseSingleTime, parseTimeRange } from "./time-parse";
 
 const SKIP_WORDS = ["رد", "بعدا", "بعداً", "skip", "نمیدونم", "نمی‌دونم", "-"];
+
+/**
+ * تحلیل قطعیِ پروفایل (بدون هوش مصنوعی) برای حالت‌های رایج مثل
+ * «برقکار روزمزد» یا «علی رضایی، برقکار، روزمزد».
+ */
+function profileDeterministic(text: string): ProfileAnswer {
+  const employmentType = /پیمانکار/.test(text)
+    ? "پیمانکار"
+    : /روزمزد|روز ?مزد/.test(text)
+      ? "روزمزد"
+      : undefined;
+
+  const cleaned = text.replace(/پیمانکار|روزمزد|روز ?مزد/g, " ");
+  const parts = cleaned
+    .split(/[،,]/)
+    .map((s) => s.trim().replace(/\s+/g, " "))
+    .filter(Boolean);
+
+  let fullName: string | undefined;
+  let trade: string | undefined;
+
+  if (parts.length >= 2) {
+    fullName = parts[0];
+    trade = parts[1];
+  } else if (parts.length === 1) {
+    const words = parts[0].split(" ").filter(Boolean);
+    if (words.length === 1) {
+      trade = words[0];
+    } else {
+      // چند کلمه بدون کاما: آخرین کلمه تخصص، بقیه نام
+      trade = words[words.length - 1];
+      fullName = words.slice(0, -1).join(" ");
+    }
+  }
+
+  return { fullName, trade, employmentType };
+}
 
 /** آیا پاسخ کاربر به‌معنی «رد کردن این مورد» است */
 export function isSkip(text: string): boolean {
@@ -146,9 +185,17 @@ export async function processAnswer(
 
   switch (item.kind) {
     case "profile": {
-      const p = await parseWorkerProfile(text);
+      // اول تلاش قطعی (بدون هوش مصنوعی)، بعد در صورت نیاز هوش مصنوعی
+      let p = profileDeterministic(text);
+      if (!p.trade && !p.employmentType) {
+        p = await parseWorkerProfile(text);
+      }
       if (!p.trade && !p.employmentType && !p.fullName) {
-        return { ok: false, skipped: false, note: "متوجه نشدم." };
+        return {
+          ok: false,
+          skipped: false,
+          note: "متوجه نشدم. مثلاً: «علی رضایی، برقکار، روزمزد»",
+        };
       }
       await updateWorkerProfile(item.workerId!, p);
       return {
@@ -161,14 +208,32 @@ export async function processAnswer(
       };
     }
     case "attendance_time": {
-      const t = await parseEntryExit(text, item.label);
-      const entry = t.entry ?? item.entry ?? null;
-      const exit = t.exit ?? item.exit ?? null;
+      let entry = item.entry ?? null;
+      let exit = item.exit ?? null;
+
+      // ۱) بازه‌ی «X تا Y» (قطعی، بدون هوش مصنوعی)
+      const range = parseTimeRange(text);
+      if (range) {
+        entry = range.entry;
+        exit = range.exit;
+      } else {
+        // ۲) زمان تکی برای همان فیلدِ ناقص (قطعی)
+        if (!exit) exit = parseSingleTime(text, "exit") ?? exit;
+        else if (!entry) entry = parseSingleTime(text, "entry") ?? entry;
+
+        // ۳) اگر باز هم کامل نشد، از هوش مصنوعی کمک بگیر (بدون کرش)
+        if (!entry || !exit) {
+          const t = await parseEntryExit(text, item.label);
+          entry = entry ?? t.entry ?? t.exit ?? null;
+          exit = exit ?? t.exit ?? t.entry ?? null;
+        }
+      }
+
       if (!entry || !exit) {
         return {
           ok: false,
           skipped: false,
-          note: "هر دو ساعت ورود و خروج را بگو (مثلاً «۷ تا ۵»).",
+          note: "ساعت را نفهمیدم. مثلاً بنویس «۵ عصر» یا «۷ تا ۵».",
         };
       }
       await updateAttendanceTime(workDayId, item.workerId!, entry, exit);

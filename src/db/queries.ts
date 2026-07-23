@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "./index";
 import {
   projects,
@@ -18,6 +18,7 @@ import {
 } from "./schema";
 import { toJalali } from "@/lib/jalali";
 import { calcWork } from "@/services/attendance-calc";
+import { namesMatch } from "@/lib/text-normalize";
 
 /** پروژه‌ی متناظر با یک چت تلگرام را می‌گیرد یا می‌سازد */
 export async function getOrCreateProject(chatId: number): Promise<Project> {
@@ -107,22 +108,19 @@ export async function resolveWorker(
   const db = getDb();
   const clean = name.trim();
 
-  // تطبیق با نام کامل یا اگر نام داخل aliasها باشد
-  const matches = await db
+  // همه‌ی نیروهای پروژه را می‌گیریم و با نرمال‌سازی/شباهت تطبیق می‌دهیم
+  // (تا «آیدین/ایدین/یدین» یک نفر شناخته شوند).
+  const all = await db
     .select()
     .from(workers)
-    .where(
-      and(
-        eq(workers.projectId, projectId),
-        or(
-          ilike(workers.fullName, `%${clean}%`),
-          sql`${workers.aliases}::text ilike ${"%" + clean + "%"}`,
-        ),
-      ),
-    )
-    .limit(1);
+    .where(eq(workers.projectId, projectId));
 
-  if (matches[0]) return matches[0];
+  const match = all.find(
+    (w) =>
+      namesMatch(w.fullName, clean) ||
+      (w.aliases ?? []).some((a) => namesMatch(a, clean)),
+  );
+  if (match) return match;
 
   const inserted = await db
     .insert(workers)

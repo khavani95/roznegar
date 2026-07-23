@@ -8,6 +8,7 @@ import {
   issues,
   reworks,
   workers,
+  type Worker,
 } from "@/db/schema";
 import { resolveWorker } from "@/db/queries";
 import { calcWork, timeToMinutes } from "./attendance-calc";
@@ -164,29 +165,48 @@ export async function consolidateDay(
     await resolveWorker(projectId, nw.name, nw.trade);
   }
 
-  // ساخت ردیف‌های کارکرد
-  const attendanceSummary: AttendanceRow[] = [];
-  const workerIdByName = new Map<string, number>();
-  const workedByWorkerId = new Map<number, number>();
-
+  // ابتدا نام‌ها را به نیرو تبدیل و بر اساس شناسه‌ی نیرو ادغام می‌کنیم
+  // تا «آیدین/ایدین/یدین» یک ردیف واحد شوند (نه چند ردیف تکراری).
+  const byWorkerId = new Map<
+    number,
+    { worker: Worker; entry?: string; exit?: string; workFront?: string }
+  >();
   for (const [name, rec] of attByWorker) {
     const worker = await resolveWorker(projectId, name, rec.trade);
-    workerIdByName.set(name, worker.id);
+    const ex = byWorkerId.get(worker.id);
+    if (ex) {
+      ex.entry = ex.entry ?? rec.entry;
+      ex.exit = ex.exit ?? rec.exit;
+      ex.workFront = ex.workFront ?? rec.workFront;
+    } else {
+      byWorkerId.set(worker.id, {
+        worker,
+        entry: rec.entry,
+        exit: rec.exit,
+        workFront: rec.workFront,
+      });
+    }
+  }
 
+  // ساخت ردیف‌های کارکرد (یک ردیف به‌ازای هر نیرو)
+  const attendanceSummary: AttendanceRow[] = [];
+  const workedByWorkerId = new Map<number, number>();
+
+  for (const { worker, entry, exit, workFront } of byWorkerId.values()) {
     let workedMinutes = 0;
     let overtimeMinutes = 0;
     let dayFraction = 0;
     let breakMinutes = 0;
 
-    if (rec.entry && rec.exit) {
-      const calc = calcWork(rec.entry, rec.exit);
+    if (entry && exit) {
+      const calc = calcWork(entry, exit);
       if (calc) {
         workedMinutes = calc.workedMinutes;
         overtimeMinutes = calc.overtimeMinutes;
         dayFraction = calc.dayFraction;
         breakMinutes = calc.breakMinutes;
       }
-    } else if (rec.entry || rec.exit) {
+    } else if (entry || exit) {
       dayFraction = 1;
       workedMinutes = workRules.standardWorkMinutes;
     }
@@ -196,13 +216,13 @@ export async function consolidateDay(
     await db.insert(attendance).values({
       workDayId,
       workerId: worker.id,
-      entryTime: rec.entry ?? null,
-      exitTime: rec.exit ?? null,
+      entryTime: entry ?? null,
+      exitTime: exit ?? null,
       breakMinutes,
       workedMinutes,
       dayFraction,
       overtimeMinutes,
-      workFront: rec.workFront ?? null,
+      workFront: workFront ?? null,
     });
 
     attendanceSummary.push({
@@ -211,12 +231,12 @@ export async function consolidateDay(
       trade: worker.trade,
       employmentType: worker.employmentType,
       profileStatus: worker.profileStatus,
-      entry: rec.entry ?? null,
-      exit: rec.exit ?? null,
+      entry: entry ?? null,
+      exit: exit ?? null,
       workedMinutes,
       overtimeMinutes,
       dayFraction,
-      workFront: rec.workFront ?? null,
+      workFront: workFront ?? null,
       assignedActivityMinutes: 0,
       hasActivity: false,
     });
