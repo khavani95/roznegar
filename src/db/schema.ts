@@ -14,14 +14,19 @@ import {
 /**
  * پروژه/کارگاه. هر چت تلگرام به یک پروژه نگاشت می‌شود.
  */
-export const projects = pgTable("projects", {
-  id: serial("id").primaryKey(),
-  chatId: bigint("chat_id", { mode: "number" }).notNull().unique(),
-  name: text("name").notNull().default("کارگاه"),
-  reportPrefix: text("report_prefix").notNull().default("RN"),
-  settings: jsonb("settings").$type<Record<string, unknown>>().default({}),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+export const projects = pgTable(
+  "projects",
+  {
+    id: serial("id").primaryKey(),
+    chatId: bigint("chat_id", { mode: "number" }).notNull(), // چند پروژه در یک چت مجاز است
+    name: text("name").notNull().default("کارگاه"),
+    reportPrefix: text("report_prefix").notNull().default("RN"),
+    isArchived: boolean("is_archived").notNull().default(false),
+    settings: jsonb("settings").$type<Record<string, unknown>>().default({}),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("projects_chat_idx").on(t.chatId)],
+);
 
 /**
  * دفترچه‌ی نیروها. نام‌های مستعار برای تطبیق هوشمند نگه داشته می‌شوند.
@@ -179,8 +184,9 @@ export const activityWorkers = pgTable(
  */
 export const conversationState = pgTable("conversation_state", {
   chatId: bigint("chat_id", { mode: "number" }).primaryKey(),
+  activeProjectId: integer("active_project_id"), // پروژه‌ی انتخاب‌شده‌ی چت
   workDayId: integer("work_day_id").references(() => workDays.id),
-  phase: text("phase").notNull().default("idle"), // idle | review
+  phase: text("phase").notNull().default("idle"), // idle | await_project_name | await_date | review | confirm
   questions: jsonb("questions").$type<string[]>().notNull().default([]),
   answers: jsonb("answers").$type<string[]>().notNull().default([]),
   round: integer("round").notNull().default(0),

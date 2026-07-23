@@ -42,3 +42,10 @@ export async function runExtraction(
   const questions = deterministicGaps(summary);
   return { summary, questions, complete: questions.length === 0 };
 }
+
+/** فقط وضعیت فعلی را از دیتابیس می‌خواند (بدون فراخوانی AI) */
+export async function currentGaps(workDayId: number): Promise<ReviewResult> {
+  const summary = await loadDaySummary(workDayId);
+  const questions = deterministicGaps(summary);
+  return { summary, questions, complete: questions.length === 0 };
+}
