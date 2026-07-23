@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "./index";
 import {
   projects,
@@ -14,10 +14,10 @@ import {
   type Worker,
   type WorkDay,
   type ConversationState,
-  type WizardItem,
 } from "./schema";
-import { toJalali } from "@/lib/jalali";
+import { toJalali, type JalaliInfo } from "@/lib/jalali";
 import { calcWork } from "@/services/attendance-calc";
+import { namesMatch } from "@/lib/text-normalize";
 
 /** پروژه‌ی متناظر با یک چت تلگرام را می‌گیرد یا می‌سازد */
 export async function getOrCreateProject(chatId: number): Promise<Project> {
@@ -50,18 +50,14 @@ export async function getOpenWorkDay(
   return rows[0] ?? null;
 }
 
-/** شروع یک روزکاری جدید */
-export async function startWorkDay(project: Project): Promise<WorkDay> {
+/** شروع یک روزکاری جدید برای تاریخ مشخص (پیش‌فرض امروز) */
+export async function startWorkDay(
+  project: Project,
+  j: JalaliInfo = toJalali(),
+): Promise<WorkDay> {
   const db = getDb();
-  const j = toJalali();
-
-  // شماره‌ی گزارش: پیشوند + شمارنده‌ی روزهای این پروژه
-  const countRows = await db
-    .select({ c: sql<number>`count(*)` })
-    .from(workDays)
-    .where(eq(workDays.projectId, project.id));
-  const seq = Number(countRows[0]?.c ?? 0) + 1;
-  const reportNo = `${project.reportPrefix}-${String(seq).padStart(4, "0")}`;
+  // شماره‌ی گزارش تاریخ‌محور: مثل RN-14050430
+  const reportNo = `${project.reportPrefix}-${j.key.replace(/\//g, "")}`;
 
   const inserted = await db
     .insert(workDays)
@@ -76,13 +72,84 @@ export async function startWorkDay(project: Project): Promise<WorkDay> {
   return inserted[0];
 }
 
-/** بستن روزکاری */
-export async function closeWorkDay(workDayId: number): Promise<void> {
+/** روزکاری موجود برای یک تاریخ (اگر باشد) */
+export async function getWorkDayByDate(
+  projectId: number,
+  jalaliDate: string,
+): Promise<WorkDay | null> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(workDays)
+    .where(
+      and(
+        eq(workDays.projectId, projectId),
+        eq(workDays.jalaliDate, jalaliDate),
+      ),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/** روزکاری با شناسه */
+export async function getWorkDayById(id: number): Promise<WorkDay | null> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(workDays)
+    .where(eq(workDays.id, id))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/** تغییر وضعیت روز (open | review | closed) */
+export async function setDayStatus(
+  workDayId: number,
+  status: "open" | "review" | "closed",
+): Promise<void> {
   const db = getDb();
   await db
     .update(workDays)
-    .set({ status: "closed", closedAt: new Date() })
+    .set({
+      status,
+      ...(status === "closed" ? { closedAt: new Date() } : {}),
+    })
     .where(eq(workDays.id, workDayId));
+}
+
+/** بستن روزکاری */
+export async function closeWorkDay(workDayId: number): Promise<void> {
+  await setDayStatus(workDayId, "closed");
+}
+
+/** افزایش شماره‌ی نسخه (rev) و برگرداندن مقدار جدید */
+export async function bumpRevision(workDayId: number): Promise<number> {
+  const db = getDb();
+  const rows = await db
+    .select({ r: workDays.revision })
+    .from(workDays)
+    .where(eq(workDays.id, workDayId))
+    .limit(1);
+  const next = (rows[0]?.r ?? 0) + 1;
+  await db
+    .update(workDays)
+    .set({ revision: next })
+    .where(eq(workDays.id, workDayId));
+  return next;
+}
+
+/** کل مکالمه‌ی روز به‌صورت متن (پیام‌های متنی + متن پیاده‌شده‌ی ویس‌ها) */
+export async function getDayConversation(workDayId: number): Promise<string> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(rawMessages)
+    .where(eq(rawMessages.workDayId, workDayId))
+    .orderBy(rawMessages.createdAt);
+  return rows
+    .map((m) => (m.text ?? m.transcript ?? "").trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 /** فهرست نیروهای فعال پروژه */
@@ -107,22 +174,19 @@ export async function resolveWorker(
   const db = getDb();
   const clean = name.trim();
 
-  // تطبیق با نام کامل یا اگر نام داخل aliasها باشد
-  const matches = await db
+  // همه‌ی نیروهای پروژه را می‌گیریم و با نرمال‌سازی/شباهت تطبیق می‌دهیم
+  // (تا «آیدین/ایدین/یدین» یک نفر شناخته شوند).
+  const all = await db
     .select()
     .from(workers)
-    .where(
-      and(
-        eq(workers.projectId, projectId),
-        or(
-          ilike(workers.fullName, `%${clean}%`),
-          sql`${workers.aliases}::text ilike ${"%" + clean + "%"}`,
-        ),
-      ),
-    )
-    .limit(1);
+    .where(eq(workers.projectId, projectId));
 
-  if (matches[0]) return matches[0];
+  const match = all.find(
+    (w) =>
+      namesMatch(w.fullName, clean) ||
+      (w.aliases ?? []).some((a) => namesMatch(a, clean)),
+  );
+  if (match) return match;
 
   const inserted = await db
     .insert(workers)
@@ -309,19 +373,78 @@ export async function getConversationState(
   return rows[0] ?? null;
 }
 
-export async function setConversationState(
+/** شروع/به‌روزرسانی دورِ بازبینی با فهرست سؤال‌های تازه */
+export async function setReview(
   chatId: number,
   workDayId: number,
-  phase: string,
-  queue: WizardItem[],
+  questions: string[],
+  round: number,
 ) {
   const db = getDb();
   await db
     .insert(conversationState)
-    .values({ chatId, workDayId, phase, queue, updatedAt: new Date() })
+    .values({
+      chatId,
+      workDayId,
+      phase: "review",
+      questions,
+      answers: [],
+      round,
+      updatedAt: new Date(),
+    })
     .onConflictDoUpdate({
       target: conversationState.chatId,
-      set: { workDayId, phase, queue, updatedAt: new Date() },
+      set: {
+        workDayId,
+        phase: "review",
+        questions,
+        answers: [],
+        round,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+/** به‌روزرسانی فقط سؤال‌ها و شماره‌ی دور (پاسخ‌های قبلی حفظ می‌شوند) */
+export async function setReviewQuestions(
+  chatId: number,
+  questions: string[],
+  round: number,
+) {
+  const db = getDb();
+  await db
+    .update(conversationState)
+    .set({ phase: "review", questions, round, updatedAt: new Date() })
+    .where(eq(conversationState.chatId, chatId));
+}
+
+/** افزودن یک پاسخ به پاسخ‌های جمع‌شده‌ی این بازبینی */
+export async function addAnswer(chatId: number, answer: string) {
+  const db = getDb();
+  const cur = await getConversationState(chatId);
+  const answers = [...(cur?.answers ?? []), answer];
+  await db
+    .update(conversationState)
+    .set({ answers, updatedAt: new Date() })
+    .where(eq(conversationState.chatId, chatId));
+}
+
+/** گذاشتن فاز «منتظر ورودی تاریخ» */
+export async function setAwaitDate(chatId: number) {
+  const db = getDb();
+  await db
+    .insert(conversationState)
+    .values({ chatId, phase: "await_date", questions: [], answers: [], round: 0 })
+    .onConflictDoUpdate({
+      target: conversationState.chatId,
+      set: {
+        phase: "await_date",
+        questions: [],
+        answers: [],
+        round: 0,
+        workDayId: null,
+        updatedAt: new Date(),
+      },
     });
 }
 
@@ -329,9 +452,16 @@ export async function clearConversationState(chatId: number) {
   const db = getDb();
   await db
     .insert(conversationState)
-    .values({ chatId, phase: "idle", queue: [], updatedAt: new Date() })
+    .values({ chatId, phase: "idle", questions: [], answers: [], round: 0 })
     .onConflictDoUpdate({
       target: conversationState.chatId,
-      set: { phase: "idle", queue: [], workDayId: null, updatedAt: new Date() },
+      set: {
+        phase: "idle",
+        questions: [],
+        answers: [],
+        round: 0,
+        workDayId: null,
+        updatedAt: new Date(),
+      },
     });
 }

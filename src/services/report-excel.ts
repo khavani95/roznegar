@@ -112,8 +112,9 @@ function titleBlock(
   ws.mergeCells(r1.number, 1, r1.number, span);
   styleTitle(r1.getCell(1), 14);
 
+  const rev = day.revision > 0 ? `-rev${String(day.revision).padStart(2, "0")}` : "";
   const r2 = ws.addRow([
-    `شماره گزارش: ${day.reportNo ?? "-"}    |    تاریخ: ${day.dateLabel}`,
+    `شماره گزارش: ${day.reportNo ?? "-"}${rev}    |    تاریخ: ${day.dateLabel}`,
   ]);
   ws.mergeCells(r2.number, 1, r2.number, span);
   styleTitle(r2.getCell(1), 11, false);
