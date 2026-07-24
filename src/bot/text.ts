@@ -1,19 +1,32 @@
 import { Keyboard } from "grammy";
 
-/** متن دکمه‌های منو (برای تطبیق دقیق استفاده می‌شوند) */
+/** متن دکمه‌ها (برای تطبیق دقیق استفاده می‌شوند) */
 export const BTN = {
-  startDay: "▶️ شروع روز",
-  endDay: "⏹️ پایان روز",
-  workers: "👷 نیروها",
-  todayReport: "📊 گزارش امروز",
+  // منوی اصلی
   projects: "📁 پروژه‌ها",
   newProject: "➕ پروژه جدید",
-  finalize: "✅ ثبت نهایی",
-  cancel: "✖️ لغو",
+  endAll: "⏹️ پایان روز همه",
+  // منوی داخل پروژه
+  startDay: "▶️ شروع روز",
+  endDay: "⏹️ پایان روز",
+  todayReport: "📊 گزارش امروز",
+  workers: "👷 نیروها",
+  back: "🔙 منوی اصلی",
 } as const;
 
-/** صفحه‌کلید منوی اصلی */
-export function mainKeyboard() {
+/** صفحه‌کلید منوی اصلی (بدون دکمه‌های شروع/پایان روز) */
+export function homeKeyboard() {
+  return new Keyboard()
+    .text(BTN.projects)
+    .text(BTN.newProject)
+    .row()
+    .text(BTN.endAll)
+    .resized()
+    .persistent();
+}
+
+/** صفحه‌کلید داخل یک پروژه */
+export function projectKeyboard() {
   return new Keyboard()
     .text(BTN.startDay)
     .text(BTN.endDay)
@@ -21,17 +34,7 @@ export function mainKeyboard() {
     .text(BTN.todayReport)
     .text(BTN.workers)
     .row()
-    .text(BTN.projects)
-    .text(BTN.newProject)
-    .resized()
-    .persistent();
-}
-
-/** صفحه‌کلید مرحله‌ی بازبینی */
-export function reviewKeyboard() {
-  return new Keyboard()
-    .text(BTN.finalize)
-    .text(BTN.cancel)
+    .text(BTN.back)
     .resized()
     .persistent();
 }
@@ -41,17 +44,19 @@ export const MSG = {
     "به روزنگار خوش آمدی 👷‍♂️\n\n" +
     "دستیار هوشمند گزارش روزانه‌ی کارگاه (چندپروژه‌ای).\n\n" +
     "۱) با «➕ پروژه جدید» پروژه‌هایت را بساز.\n" +
-    "۲) از «📁 پروژه‌ها» پروژه‌ی موردنظر را انتخاب کن.\n" +
+    "۲) از «📁 پروژه‌ها» یک پروژه را باز کن → دکمه‌های شروع/پایان روز ظاهر می‌شوند.\n" +
     "۳) «▶️ شروع روز» → گزارش‌ها را با متن یا ویس بفرست.\n" +
-    "۴) «⏹️ پایان روز» → دستیار سؤال می‌پرسد، جواب می‌دهی، تأیید می‌کنی.",
+    "۴) «⏹️ پایان روز» → گزارش را کارت‌به‌کارت تأیید/تغییر/حذف می‌کنی.\n\n" +
+    "🔸 «⏹️ پایان روز همه» همه‌ی پروژه‌های بازِ امروز را یکجا نشان می‌دهد.",
 
   selectProjectFirst:
-    "اول یک پروژه انتخاب کن یا بساز:\n«📁 پروژه‌ها» یا «➕ پروژه جدید».",
+    "اول یک پروژه باز کن یا بساز:\n«📁 پروژه‌ها» یا «➕ پروژه جدید».",
 
   noProjects: "هنوز پروژه‌ای نساختی. «➕ پروژه جدید» را بزن.",
   askProjectName: "نام پروژه‌ی جدید را بفرست:",
-  projectCreated: (name: string) => `✅ پروژه «${name}» ساخته و فعال شد.`,
-  projectSelected: (name: string) => `📁 پروژه‌ی فعال: «${name}»`,
+  projectCreated: (name: string) =>
+    `✅ پروژه «${name}» ساخته و باز شد.`,
+  projectSelected: (name: string) => `📁 پروژه: «${name}»`,
 
   noOpenDay: (name: string) =>
     `برای پروژه‌ی «${name}» روزی باز نیست. «▶️ شروع روز» را بزن.`,
@@ -67,7 +72,9 @@ export const MSG = {
   dayReopened: (project: string, label: string) =>
     `🔓 روز «${label}» پروژه‌ی «${project}» دوباره باز شد. پیام‌ها را بفرست.`,
 
-  saved: (name: string) => `✅ ثبت شد (پروژه: ${name}).`,
+  saved: (name: string) => `✅ ثبت شد (${name}).`,
+
+  noOpenDaysAll: "هیچ پروژه‌ای روزِ باز ندارد. ✅",
 
   notAllowed: "⛔️ دسترسی مجاز نیست.",
   noWorkers: "هنوز نیرویی ثبت نشده.",

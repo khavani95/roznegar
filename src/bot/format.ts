@@ -1,8 +1,76 @@
 import type { ExtractedEventItem } from "@/ai/schema";
-import type { DaySummary } from "@/services/consolidate";
+import type {
+  DaySummary,
+  AttendanceRow,
+  ActivityRow,
+} from "@/services/consolidate";
 import { humanDuration } from "@/services/attendance-calc";
 import { toFaDigits } from "@/lib/jalali";
 import type { WorkDay } from "@/db/schema";
+
+/** کارت یک نیرو برای مرور پایان روز */
+export function formatWorkerCard(
+  a: AttendanceRow,
+  index: number,
+  total: number,
+): string {
+  const profile = [a.trade, a.employmentType].filter(Boolean).join("، ") || "—";
+  const time =
+    a.entry || a.exit
+      ? `${a.entry ? toFaDigits(a.entry) : "—"} تا ${a.exit ? toFaDigits(a.exit) : "—"}`
+      : "—";
+  const work =
+    a.dayFraction >= 1
+      ? "۱ روز کامل"
+      : a.workedMinutes
+        ? humanDuration(a.workedMinutes)
+        : "—";
+  const ot = a.overtimeMinutes
+    ? ` (+${humanDuration(a.overtimeMinutes)} اضافه‌کاری)`
+    : "";
+  const acts =
+    a.assignedActivityMinutes || a.hasActivity ? "" : "\n⚠️ بدون فعالیت ثبت‌شده";
+  return (
+    `👷 نیرو ${toFaDigits(index + 1)} از ${toFaDigits(total)}\n\n` +
+    `▪️ نام: ${a.name}\n` +
+    `▪️ تخصص/نوع: ${profile}\n` +
+    `▪️ ساعت: ${time}\n` +
+    `▪️ کارکرد: ${work}${ot}${acts}`
+  );
+}
+
+/** کارت فعالیت‌ها */
+export function formatActivitiesCard(activities: ActivityRow[]): string {
+  if (!activities.length) return "🏗️ فعالیت‌ها:\n— هیچ فعالیتی ثبت نشده.";
+  const lines = activities.map((a) => {
+    const time = a.isFullDay
+      ? "تمام‌روز"
+      : a.startTime && a.endTime
+        ? `${toFaDigits(a.startTime)}–${toFaDigits(a.endTime)}`
+        : "بدون زمان";
+    const who = a.workers.length ? ` — ${a.workers.join("، ")}` : "";
+    return `• ${a.workFront ? a.workFront + ": " : ""}${a.description} (${time})${who}`;
+  });
+  return "🏗️ فعالیت‌ها:\n" + lines.join("\n");
+}
+
+/** کارت موانع و دوباره‌کاری */
+export function formatIssuesReworkCard(s: DaySummary): string {
+  const parts: string[] = [];
+  if (s.issues.length) {
+    parts.push("⚠️ موانع/مشکلات:");
+    for (const i of s.issues) parts.push(`• ${i.type}: ${i.description}`);
+  }
+  if (s.reworks.length) {
+    parts.push("🔁 دوباره‌کاری‌ها:");
+    for (const r of s.reworks)
+      parts.push(
+        `• ${r.workFront ? r.workFront + " — " : ""}${r.description}${r.cause ? ` (علت: ${r.cause})` : ""}`,
+      );
+  }
+  if (!parts.length) parts.push("موانع یا دوباره‌کاری‌ای ثبت نشده.");
+  return parts.join("\n");
+}
 
 /** خلاصه‌ی «چه چیزی فهمیدم» برای بازخورد آنیِ بعد از هر پیام */
 export function formatAck(events: ExtractedEventItem[]): string {

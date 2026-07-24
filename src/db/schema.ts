@@ -182,13 +182,22 @@ export const activityWorkers = pgTable(
  * وضعیت گفتگوی «بازبینی پایان روز».
  * سوال‌های دور فعلی و پاسخ‌های جمع‌شده تا فشردن «ثبت نهایی».
  */
+/** وضعیت مرور کارتیِ پایان روز */
+export interface CardState {
+  index: number; // شماره‌ی کارت فعلی
+  deletions: string[]; // نام نیروهای حذف‌شده
+  changes: string[]; // اصلاحیه‌های جمع‌شده
+  editTarget: string | null; // در حال اصلاحِ کدام مورد
+}
+
 export const conversationState = pgTable("conversation_state", {
   chatId: bigint("chat_id", { mode: "number" }).primaryKey(),
   activeProjectId: integer("active_project_id"), // پروژه‌ی انتخاب‌شده‌ی چت
   workDayId: integer("work_day_id").references(() => workDays.id),
-  phase: text("phase").notNull().default("idle"), // idle | await_project_name | await_date | review | confirm
+  phase: text("phase").notNull().default("idle"), // idle | await_project_name | await_date | cards | card_edit
   questions: jsonb("questions").$type<string[]>().notNull().default([]),
   answers: jsonb("answers").$type<string[]>().notNull().default([]),
+  cardState: jsonb("card_state").$type<CardState | null>(),
   round: integer("round").notNull().default(0),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

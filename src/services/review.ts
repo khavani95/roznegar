@@ -1,5 +1,6 @@
 import { getDayConversation, listWorkers } from "@/db/queries";
 import { extractDay } from "@/ai/day";
+import { namesMatch } from "@/lib/text-normalize";
 import {
   writeDayData,
   loadDaySummary,
@@ -20,22 +21,39 @@ export interface ReviewResult {
 export async function runExtraction(
   projectId: number,
   workDayId: number,
-  qa?: { questions: string[]; answers: string[] },
+  opts?: { changes?: string[]; deletions?: string[] },
 ): Promise<ReviewResult> {
   const conversation = await getDayConversation(workDayId);
   const known = (await listWorkers(projectId)).map((w) => w.fullName);
 
+  const changes = opts?.changes ?? [];
+  const deletions = opts?.deletions ?? [];
+
   let convo = conversation;
-  if (qa && qa.answers.length) {
-    // سؤال‌ها را کنار پاسخ‌ها می‌گذاریم تا AI بفهمد هر پاسخ به کدام نیرو مربوط است
+  if (changes.length) {
+    convo += "\n\n[اصلاحیه‌های سرکارگر روی گزارش:]\n" + changes.join("\n");
+  }
+  if (deletions.length) {
     convo +=
-      "\n\n[دستیار این سؤال‌ها را پرسید:]\n" +
-      qa.questions.map((q, i) => `${i + 1}. ${q}`).join("\n") +
-      "\n\n[سرکارگر در پاسخ گفت:]\n" +
-      qa.answers.join("\n");
+      "\n\n[این نفرات در گزارش نیایند (سرکارگر حذفشان کرد): " +
+      deletions.join("، ") +
+      "]";
   }
 
   const { data } = await extractDay(convo, known);
+
+  // حذف قطعی نیروهای حذف‌شده (چه از فهرست نیروها، چه از فعالیت‌ها)
+  if (deletions.length) {
+    data.workers = data.workers.filter(
+      (w) => !deletions.some((d) => namesMatch(d, w.name)),
+    );
+    for (const a of data.activities) {
+      a.workers = (a.workers ?? []).filter(
+        (nm) => !deletions.some((d) => namesMatch(d, nm)),
+      );
+    }
+  }
+
   await writeDayData(projectId, workDayId, data);
 
   const summary = await loadDaySummary(workDayId);

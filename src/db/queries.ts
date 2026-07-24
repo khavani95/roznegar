@@ -14,6 +14,7 @@ import {
   type Worker,
   type WorkDay,
   type ConversationState,
+  type CardState,
 } from "./schema";
 import { toJalali, type JalaliInfo } from "@/lib/jalali";
 import { calcWork } from "@/services/attendance-calc";
@@ -69,6 +70,28 @@ export async function setActiveProject(chatId: number, projectId: number) {
       target: conversationState.chatId,
       set: { activeProjectId: projectId, updatedAt: new Date() },
     });
+}
+
+/** پاک‌کردن پروژه‌ی فعال (بازگشت به منوی اصلی) */
+export async function clearActiveProject(chatId: number) {
+  const db = getDb();
+  await db
+    .update(conversationState)
+    .set({ activeProjectId: null, phase: "idle", updatedAt: new Date() })
+    .where(eq(conversationState.chatId, chatId));
+}
+
+/** همه‌ی روزهای بازِ چت (برای «پایان روز همه») */
+export async function listOpenDays(
+  chatId: number,
+): Promise<Array<{ day: WorkDay; project: Project }>> {
+  const db = getDb();
+  return db
+    .select({ day: workDays, project: projects })
+    .from(workDays)
+    .innerJoin(projects, eq(workDays.projectId, projects.id))
+    .where(and(eq(projects.chatId, chatId), eq(workDays.status, "open")))
+    .orderBy(projects.name);
 }
 
 /** گذاشتن فاز «منتظر نام پروژه» */
@@ -451,6 +474,44 @@ export async function setReview(
     });
 }
 
+/** شروع مرور کارتیِ پایان روز */
+export async function setCards(chatId: number, workDayId: number) {
+  const db = getDb();
+  const cardState: CardState = {
+    index: 0,
+    deletions: [],
+    changes: [],
+    editTarget: null,
+  };
+  await db
+    .update(conversationState)
+    .set({ phase: "cards", workDayId, cardState, updatedAt: new Date() })
+    .where(eq(conversationState.chatId, chatId));
+}
+
+/** به‌روزرسانی وضعیت کارت‌ها (و اختیاری فاز) */
+export async function updateCardState(
+  chatId: number,
+  patch: Partial<CardState>,
+  phase?: string,
+) {
+  const db = getDb();
+  const cur = await getConversationState(chatId);
+  const base: CardState = cur?.cardState ?? {
+    index: 0,
+    deletions: [],
+    changes: [],
+    editTarget: null,
+  };
+  const cardState: CardState = { ...base, ...patch };
+  const set: Record<string, unknown> = { cardState, updatedAt: new Date() };
+  if (phase) set.phase = phase;
+  await db
+    .update(conversationState)
+    .set(set)
+    .where(eq(conversationState.chatId, chatId));
+}
+
 /** گذاشتن فاز «تأیید نهایی» */
 export async function setConfirm(chatId: number, workDayId: number) {
   const db = getDb();
@@ -517,6 +578,7 @@ export async function clearConversationState(chatId: number) {
         phase: "idle",
         questions: [],
         answers: [],
+        cardState: null,
         round: 0,
         workDayId: null,
         updatedAt: new Date(),

@@ -288,12 +288,14 @@ export async function loadDaySummary(workDayId: number): Promise<DaySummary> {
     })
     .from(attendance)
     .innerJoin(workers, eq(attendance.workerId, workers.id))
-    .where(eq(attendance.workDayId, workDayId));
+    .where(eq(attendance.workDayId, workDayId))
+    .orderBy(attendance.id);
 
   const actRows = await db
     .select()
     .from(activities)
-    .where(eq(activities.workDayId, workDayId));
+    .where(eq(activities.workDayId, workDayId))
+    .orderBy(activities.id);
 
   const links = await db
     .select({
