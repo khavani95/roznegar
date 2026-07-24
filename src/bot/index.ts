@@ -90,6 +90,12 @@ function registerHandlers(bot: Bot) {
       await ctx.reply(MSG.selectProjectFirst);
       return;
     }
+    // اگر روزِ بازی وجود دارد، همان فعال است — دوباره باز نمی‌کنیم
+    const open = await getOpenWorkDay(project.id);
+    if (open) {
+      await ctx.reply(MSG.dayAlreadyOpen(project.name, open.dateLabel));
+      return;
+    }
     const kb = new InlineKeyboard()
       .text("📅 امروز", "d:today")
       .text("📅 دیروز", "d:yesterday")

@@ -17,7 +17,7 @@ import {
 } from "./schema";
 import { toJalali, type JalaliInfo } from "@/lib/jalali";
 import { calcWork } from "@/services/attendance-calc";
-import { namesMatch } from "@/lib/text-normalize";
+import { findWorkerMatch } from "@/lib/text-normalize";
 
 /** ساخت پروژه‌ی جدید برای یک چت */
 export async function createProject(
@@ -228,12 +228,11 @@ export async function resolveWorker(
     .from(workers)
     .where(eq(workers.projectId, projectId));
 
-  const match = all.find(
-    (w) =>
-      namesMatch(w.fullName, clean) ||
-      (w.aliases ?? []).some((a) => namesMatch(a, clean)),
+  const idx = findWorkerMatch(
+    clean,
+    all.map((w) => [w.fullName, ...(w.aliases ?? [])]),
   );
-  if (match) return match;
+  if (idx >= 0) return all[idx];
 
   const inserted = await db
     .insert(workers)

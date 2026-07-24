@@ -56,6 +56,10 @@ export const MSG = {
   noOpenDay: (name: string) =>
     `برای پروژه‌ی «${name}» روزی باز نیست. «▶️ شروع روز» را بزن.`,
 
+  dayAlreadyOpen: (name: string, label: string) =>
+    `⚠️ پروژه‌ی «${name}» یک روز باز دارد (${label}) و همان فعال است.\n` +
+    "گزارش‌هایت را بفرست، یا «⏹️ پایان روز» را بزن.",
+
   dayStarted: (project: string, label: string, reportNo: string) =>
     `✅ روز باز شد.\n📁 ${project}\n📅 ${label}\n🔖 ${reportNo}\n\n` +
     "گزارش‌هایت را با متن یا ویس بفرست.",
