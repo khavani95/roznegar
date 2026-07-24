@@ -1,13 +1,21 @@
 import { Bot, InputFile, InlineKeyboard, type Context } from "grammy";
 import { config } from "@/lib/config";
-import { BTN, MSG, mainKeyboard, reviewKeyboard } from "./text";
-import { formatDaySummary } from "./format";
+import { BTN, MSG, homeKeyboard, projectKeyboard } from "./text";
+import {
+  formatDaySummary,
+  formatWorkerCard,
+  formatActivitiesCard,
+  formatIssuesReworkCard,
+} from "./format";
 import {
   createProject,
   listProjects,
+  getProjectById,
   getActiveProject,
   setActiveProject,
+  clearActiveProject,
   setAwaitProjectName,
+  listOpenDays,
   getOpenWorkDay,
   getWorkDayById,
   getWorkDayByDate,
@@ -17,15 +25,13 @@ import {
   listWorkers,
   saveRawMessage,
   getConversationState,
-  setReview,
-  setReviewQuestions,
-  setConfirm,
   setAwaitDate,
-  addAnswer,
+  setCards,
+  updateCardState,
   clearConversationState,
 } from "@/db/queries";
 import { transcribeAudio } from "@/ai/extract";
-import { runExtraction, currentGaps } from "@/services/review";
+import { runExtraction } from "@/services/review";
 import { loadDaySummary } from "@/services/consolidate";
 import { buildDailyExcel } from "@/services/report-excel";
 import {
@@ -58,16 +64,16 @@ function registerHandlers(bot: Bot) {
   });
 
   bot.command("start", async (ctx) => {
-    await ctx.reply(MSG.welcome, { reply_markup: mainKeyboard() });
+    await clearActiveProject(ctx.chat.id);
+    await ctx.reply(MSG.welcome, { reply_markup: homeKeyboard() });
   });
 
-  // ── پروژه جدید ─────────────────────────────────────
+  // ── منوی اصلی ──────────────────────────────────────
   bot.hears(BTN.newProject, async (ctx) => {
     await setAwaitProjectName(ctx.chat.id);
     await ctx.reply(MSG.askProjectName);
   });
 
-  // ── فهرست پروژه‌ها برای انتخاب ──────────────────────
   bot.hears(BTN.projects, async (ctx) => {
     const projects = await listProjects(ctx.chat.id);
     if (!projects.length) {
@@ -80,14 +86,39 @@ function registerHandlers(bot: Bot) {
       const mark = active?.id === p.id ? "✅ " : "";
       kb.text(`${mark}${p.name}`, `p:${p.id}`).row();
     }
-    await ctx.reply("پروژه‌ی موردنظر را انتخاب کن:", { reply_markup: kb });
+    await ctx.reply("پروژه را انتخاب کن:", { reply_markup: kb });
   });
 
-  // ── شروع روز → انتخاب تاریخ ─────────────────────────
+  bot.hears(BTN.back, async (ctx) => {
+    const st = await getConversationState(ctx.chat.id);
+    if (st?.workDayId && (st.phase === "cards" || st.phase === "card_edit")) {
+      await setDayStatus(st.workDayId, "open"); // مرور را رها کن، روز باز بماند
+    }
+    await clearActiveProject(ctx.chat.id);
+    await ctx.reply("منوی اصلی 🏠", { reply_markup: homeKeyboard() });
+  });
+
+  // ── پایان روز همه ──────────────────────────────────
+  bot.hears(BTN.endAll, async (ctx) => {
+    const opens = await listOpenDays(ctx.chat.id);
+    if (!opens.length) {
+      await ctx.reply(MSG.noOpenDaysAll);
+      return;
+    }
+    const kb = new InlineKeyboard();
+    for (const { day, project } of opens) {
+      kb.text(`${project.name} — ${day.dateLabel}`, `end:${day.id}`).row();
+    }
+    await ctx.reply("کدام پروژه را ببندم؟", { reply_markup: kb });
+  });
+
+  // ── داخل پروژه ─────────────────────────────────────
   bot.hears(BTN.startDay, async (ctx) => {
     const project = await getActiveProject(ctx.chat.id);
-    if (!project) {
-      await ctx.reply(MSG.selectProjectFirst);
+    if (!project) return await ctx.reply(MSG.selectProjectFirst);
+    const open = await getOpenWorkDay(project.id);
+    if (open) {
+      await ctx.reply(MSG.dayAlreadyOpen(project.name, open.dateLabel));
       return;
     }
     const kb = new InlineKeyboard()
@@ -100,40 +131,29 @@ function registerHandlers(bot: Bot) {
     });
   });
 
-  // ── گزارش امروز (پیش‌نمایش) ─────────────────────────
+  bot.hears(BTN.endDay, async (ctx) => {
+    const project = await getActiveProject(ctx.chat.id);
+    if (!project) return await ctx.reply(MSG.selectProjectFirst);
+    const day = await getOpenWorkDay(project.id);
+    if (!day) return await ctx.reply(MSG.noOpenDay(project.name));
+    await beginReview(bot, ctx, project, day);
+  });
+
   bot.hears(BTN.todayReport, async (ctx) => {
     const project = await getActiveProject(ctx.chat.id);
-    if (!project) {
-      await ctx.reply(MSG.selectProjectFirst);
-      return;
-    }
+    if (!project) return await ctx.reply(MSG.selectProjectFirst);
     const day = await getOpenWorkDay(project.id);
-    if (!day) {
-      await ctx.reply(MSG.noOpenDay(project.name));
-      return;
-    }
+    if (!day) return await ctx.reply(MSG.noOpenDay(project.name));
     await ctx.reply(MSG.processing);
     const res = await runExtraction(project.id, day.id);
     await ctx.reply(formatDaySummary(day, res.summary));
-    if (res.questions.length) {
-      await ctx.reply(
-        "⚠️ موارد ناقص (آخر روز پرسیده می‌شوند):\n" + numbered(res.questions),
-      );
-    }
   });
 
-  // ── نیروها ─────────────────────────────────────────
   bot.hears(BTN.workers, async (ctx) => {
     const project = await getActiveProject(ctx.chat.id);
-    if (!project) {
-      await ctx.reply(MSG.selectProjectFirst);
-      return;
-    }
+    if (!project) return await ctx.reply(MSG.selectProjectFirst);
     const workers = await listWorkers(project.id);
-    if (!workers.length) {
-      await ctx.reply(MSG.noWorkers);
-      return;
-    }
+    if (!workers.length) return await ctx.reply(MSG.noWorkers);
     const lines = workers.map((w, i) => {
       const tags = [w.trade, w.employmentType].filter(Boolean).join("، ");
       const flag = w.profileStatus !== "complete" ? " ⚠️" : "";
@@ -143,64 +163,6 @@ function registerHandlers(bot: Bot) {
       `👷 نیروهای «${project.name}» (${toFaDigits(workers.length)}):\n\n` +
         lines.join("\n"),
     );
-  });
-
-  // ── پایان روز ──────────────────────────────────────
-  bot.hears(BTN.endDay, async (ctx) => {
-    const project = await getActiveProject(ctx.chat.id);
-    if (!project) {
-      await ctx.reply(MSG.selectProjectFirst);
-      return;
-    }
-    const day = await getOpenWorkDay(project.id);
-    if (!day) {
-      await ctx.reply(MSG.noOpenDay(project.name));
-      return;
-    }
-    await beginReview(bot, ctx, project, day);
-  });
-
-  // ── ثبت نهایی (در مرحله‌ی بازبینی) ──────────────────
-  bot.hears(BTN.finalize, async (ctx) => {
-    const state = await getConversationState(ctx.chat.id);
-    const project = await getActiveProject(ctx.chat.id);
-    if (state?.phase !== "review" || !state.workDayId || !project) {
-      await ctx.reply("چیزی برای ثبت نیست.", { reply_markup: mainKeyboard() });
-      return;
-    }
-    const day = await getWorkDayById(state.workDayId);
-    if (!day) return;
-
-    await ctx.reply(MSG.processing);
-    const answers = state.answers ?? [];
-    const res = answers.length
-      ? await runExtraction(project.id, day.id, {
-          questions: state.questions ?? [],
-          answers,
-        })
-      : await currentGaps(day.id);
-
-    await ctx.reply(formatDaySummary(day, res.summary));
-    if (res.complete) {
-      await showConfirm(ctx, day);
-    } else {
-      await setReviewQuestions(ctx.chat.id, res.questions, (state.round ?? 1) + 1);
-      await ctx.reply(
-        "چند مورد هنوز مونده — جواب بده بعد دوباره «✅ ثبت نهایی»:\n\n" +
-          numbered(res.questions),
-        { reply_markup: reviewKeyboard() },
-      );
-    }
-  });
-
-  // ── لغو ────────────────────────────────────────────
-  bot.hears(BTN.cancel, async (ctx) => {
-    const state = await getConversationState(ctx.chat.id);
-    if (state?.workDayId && (state.phase === "review" || state.phase === "confirm")) {
-      await setDayStatus(state.workDayId, "open");
-    }
-    await clearConversationState(ctx.chat.id);
-    await ctx.reply("لغو شد. روز باز است.", { reply_markup: mainKeyboard() });
   });
 
   // ── دکمه‌های شیشه‌ای ────────────────────────────────
@@ -216,23 +178,29 @@ function registerHandlers(bot: Bot) {
 
     // انتخاب پروژه
     if (data.startsWith("p:")) {
-      const id = Number(data.slice(2));
-      await setActiveProject(chatId, id);
+      await setActiveProject(chatId, Number(data.slice(2)));
       const project = await getActiveProject(chatId);
       await ctx.reply(MSG.projectSelected(project?.name ?? "-"), {
-        reply_markup: mainKeyboard(),
+        reply_markup: projectKeyboard(),
       });
       return;
     }
 
-    const project = await getActiveProject(chatId);
+    // بستن یک پروژه از «پایان روز همه»
+    if (data.startsWith("end:")) {
+      const day = await getWorkDayById(Number(data.slice(4)));
+      if (!day) return;
+      const project = await getProjectById(day.projectId);
+      if (!project) return;
+      await setActiveProject(chatId, project.id);
+      await beginReview(bot, ctx, project, day);
+      return;
+    }
 
     // انتخاب تاریخ
     if (data.startsWith("d:")) {
-      if (!project) {
-        await ctx.reply(MSG.selectProjectFirst);
-        return;
-      }
+      const project = await getActiveProject(chatId);
+      if (!project) return await ctx.reply(MSG.selectProjectFirst);
       if (data === "d:today") await startDayForDate(ctx, project, toJalali());
       else if (data === "d:yesterday")
         await startDayForDate(ctx, project, jalaliDaysAgo(1));
@@ -243,27 +211,13 @@ function registerHandlers(bot: Bot) {
       return;
     }
 
-    // تأیید/تغییر گزارش نهایی
-    if (data === "confirm:yes") {
-      const state = await getConversationState(chatId);
-      if (!project || !state?.workDayId) return;
-      const day = await getWorkDayById(state.workDayId);
-      if (day) await finalize(bot, ctx, project, day);
-      return;
-    }
-    if (data === "confirm:edit") {
-      const state = await getConversationState(chatId);
-      await setReviewQuestions(chatId, state?.questions ?? [], state?.round ?? 1);
-      await ctx.reply(
-        "بگو چی رو عوض کنم (مثلاً: «ساعت خروج علی ۶ بود» یا «شایان امروز نبود»).\n" +
-          "بعد «✅ ثبت نهایی» رو بزن.",
-        { reply_markup: reviewKeyboard() },
-      );
+    // کارت‌های مرور پایان روز
+    if (data.startsWith("card:")) {
+      await handleCardCallback(bot, ctx, data);
       return;
     }
   });
 
-  // ── ویس ────────────────────────────────────────────
   bot.on(["message:voice", "message:audio"], async (ctx) => {
     try {
       const file = await ctx.getFile();
@@ -281,7 +235,6 @@ function registerHandlers(bot: Bot) {
     }
   });
 
-  // ── متن ────────────────────────────────────────────
   bot.on("message:text", async (ctx) => {
     try {
       await routeMessage(bot, ctx, ctx.message.text, {
@@ -295,75 +248,60 @@ function registerHandlers(bot: Bot) {
   });
 }
 
-/** مسیر‌دهی یک پیام بر اساس فاز فعلی */
+/** مسیر‌دهی پیام بر اساس فاز */
 async function routeMessage(
   bot: Bot,
   ctx: Context,
   text: string,
-  meta: {
-    kind: "text" | "voice";
-    telegramMessageId?: number;
-    telegramFileId?: string;
-  },
+  meta: { kind: "text" | "voice"; telegramMessageId?: number; telegramFileId?: string },
 ) {
   const chatId = ctx.chat!.id;
   const state = await getConversationState(chatId);
 
-  // ساخت پروژه‌ی جدید
   if (state?.phase === "await_project_name") {
     const project = await createProject(chatId, text);
     await setActiveProject(chatId, project.id);
     await ctx.reply(MSG.projectCreated(project.name), {
-      reply_markup: mainKeyboard(),
+      reply_markup: projectKeyboard(),
     });
     return;
   }
 
-  // ورودی تاریخ
   if (state?.phase === "await_date") {
     const project = await getActiveProject(chatId);
-    if (!project) {
-      await ctx.reply(MSG.selectProjectFirst);
-      return;
-    }
+    if (!project) return await ctx.reply(MSG.selectProjectFirst);
     const j = parseJalaliInput(text);
-    if (!j) {
-      await ctx.reply("تاریخ را درست بفرست، مثل: ۱۴۰۵/۰۴/۲۸");
-      return;
-    }
+    if (!j) return await ctx.reply("تاریخ را درست بفرست، مثل: ۱۴۰۵/۰۴/۲۸");
     await startDayForDate(ctx, project, j);
     return;
   }
 
-  // پاسخ به سؤالات بازبینی
-  if (state?.phase === "review") {
-    await addAnswer(chatId, text);
-    await ctx.reply("✅ پاسخت ثبت شد. وقتی تموم شد «✅ ثبت نهایی» رو بزن.");
-    return;
-  }
-
-  // در مرحله‌ی تأیید، متن = اصلاحیه → برگشت به بازبینی
-  if (state?.phase === "confirm") {
-    await addAnswer(chatId, text);
-    await setReviewQuestions(chatId, state.questions ?? [], state.round ?? 1);
-    await ctx.reply(
-      "✅ اصلاحیه ثبت شد. «✅ ثبت نهایی» رو بزن تا اعمال بشه.",
-      { reply_markup: reviewKeyboard() },
+  // پاسخ به «تغییر» یک کارت
+  if (state?.phase === "card_edit" && state.cardState) {
+    const project = await getActiveProject(chatId);
+    const cs = state.cardState;
+    const change = `برای ${cs.editTarget ?? "گزارش"}: ${text}`;
+    await updateCardState(
+      chatId,
+      { changes: [...cs.changes, change], editTarget: null, index: cs.index + 1 },
+      "cards",
     );
+    await ctx.reply("✅ اصلاحیه ثبت شد.");
+    if (project && state.workDayId)
+      await showCard(bot, ctx, project, state.workDayId, cs.index + 1);
     return;
   }
 
-  // جمع‌آوری پیام‌های روز برای پروژه‌ی فعال
+  if (state?.phase === "cards") {
+    await ctx.reply("از دکمه‌های کارت استفاده کن: ✅ تأیید / ✏️ تغییر / 🗑️ حذف.");
+    return;
+  }
+
+  // جمع‌آوری پیام‌های روز
   const project = await getActiveProject(chatId);
-  if (!project) {
-    await ctx.reply(MSG.selectProjectFirst);
-    return;
-  }
+  if (!project) return await ctx.reply(MSG.selectProjectFirst);
   const day = await getOpenWorkDay(project.id);
-  if (!day) {
-    await ctx.reply(MSG.noOpenDay(project.name));
-    return;
-  }
+  if (!day) return await ctx.reply(MSG.noOpenDay(project.name));
   await saveRawMessage({
     workDayId: day.id,
     telegramMessageId: meta.telegramMessageId,
@@ -375,77 +313,152 @@ async function routeMessage(
   await ctx.reply(MSG.saved(project.name));
 }
 
-/** ساخت یا بازکردن روز برای یک تاریخ (پروژه‌ی فعال) */
 async function startDayForDate(ctx: Context, project: Project, j: JalaliInfo) {
   const chatId = ctx.chat!.id;
-  // فاز را پاک می‌کنیم ولی پروژه‌ی فعال حفظ می‌شود
-  await clearConversationState(chatId);
-
   const existing = await getWorkDayByDate(project.id, j.key);
   if (existing) {
     if (existing.status !== "open") await setDayStatus(existing.id, "open");
     await ctx.reply(MSG.dayReopened(project.name, existing.dateLabel), {
-      reply_markup: mainKeyboard(),
+      reply_markup: projectKeyboard(),
     });
     return;
   }
-
   const day = await startWorkDay(project, j);
   await ctx.reply(
     MSG.dayStarted(project.name, day.dateLabel, day.reportNo ?? "-"),
-    { reply_markup: mainKeyboard() },
+    { reply_markup: projectKeyboard() },
   );
 }
 
-/** شروع بازبینی: استخراج کل روز + طرح سؤال‌ها */
-async function beginReview(
+/** شروع مرور کارتی */
+async function beginReview(bot: Bot, ctx: Context, project: Project, day: WorkDay) {
+  await ctx.reply(MSG.processing);
+  await runExtraction(project.id, day.id); // استخراج اولیه
+  await setDayStatus(day.id, "review");
+  await setCards(ctx.chat!.id, day.id);
+  await ctx.reply(
+    `📋 مرور گزارش «${project.name}» — ${day.dateLabel}\n` +
+      "هر کارت را تأیید، تغییر یا حذف کن. تغییرها آخر یکجا اعمال می‌شوند.",
+  );
+  await showCard(bot, ctx, project, day.id, 0);
+}
+
+/** نمایش کارت شماره‌ی index */
+async function showCard(
   bot: Bot,
   ctx: Context,
   project: Project,
-  day: WorkDay,
+  workDayId: number,
+  index: number,
 ) {
-  await ctx.reply(MSG.processing);
-  const res = await runExtraction(project.id, day.id);
-  await setDayStatus(day.id, "review");
-  await ctx.reply(formatDaySummary(day, res.summary));
+  const s = await loadDaySummary(workDayId);
+  const W = s.attendance.length;
 
-  if (res.complete) {
-    await showConfirm(ctx, day);
+  if (index < W) {
+    const a = s.attendance[index];
+    const kb = new InlineKeyboard()
+      .text("✅ تأیید", "card:ok")
+      .text("✏️ تغییر", "card:edit")
+      .text("🗑️ حذف", `card:del:${a.workerId}`);
+    await ctx.reply(formatWorkerCard(a, index, W), { reply_markup: kb });
+  } else if (index === W) {
+    const kb = new InlineKeyboard()
+      .text("✅ تأیید", "card:ok")
+      .text("✏️ تغییر", "card:edit");
+    await ctx.reply(formatActivitiesCard(s.activities), { reply_markup: kb });
+  } else if (index === W + 1) {
+    const kb = new InlineKeyboard()
+      .text("✅ تمام", "card:ok")
+      .text("✏️ اضافه/تغییر", "card:edit");
+    await ctx.reply(
+      formatIssuesReworkCard(s) +
+        "\n\nموانع یا دوباره‌کاری‌ای برای اضافه/اصلاح هست؟",
+      { reply_markup: kb },
+    );
+  } else {
+    await finalizeFromCards(bot, ctx, project, workDayId);
+  }
+}
+
+/** پردازش دکمه‌های کارت */
+async function handleCardCallback(bot: Bot, ctx: Context, data: string) {
+  const chatId = ctx.chat!.id;
+  const state = await getConversationState(chatId);
+  const project = await getActiveProject(chatId);
+  if (!state?.cardState || !state.workDayId || !project) return;
+  const cs = state.cardState;
+
+  if (data.startsWith("card:del:")) {
+    const workerId = Number(data.split(":")[2]);
+    const s = await loadDaySummary(state.workDayId);
+    const w = s.attendance.find((x) => x.workerId === workerId);
+    if (w) {
+      await updateCardState(chatId, { deletions: [...cs.deletions, w.name] });
+      await ctx.reply(`🗑️ «${w.name}» حذف شد.`);
+    }
+    await advanceCard(bot, ctx, project, state.workDayId, cs.index);
     return;
   }
-  await setReview(ctx.chat!.id, day.id, res.questions, 1);
-  await ctx.reply(
-    "📝 برای کامل‌شدن گزارش این‌ها رو جواب بده (چند تا با هم، متن یا ویس)، " +
-      "بعد «✅ ثبت نهایی»:\n\n" +
-      numbered(res.questions),
-    { reply_markup: reviewKeyboard() },
-  );
+
+  if (data === "card:edit") {
+    const s = await loadDaySummary(state.workDayId);
+    const W = s.attendance.length;
+    let target = "گزارش";
+    if (cs.index < W) target = s.attendance[cs.index].name;
+    else if (cs.index === W) target = "فعالیت‌ها";
+    else target = "موانع و دوباره‌کاری";
+    await updateCardState(chatId, { editTarget: target }, "card_edit");
+    await ctx.reply(`✏️ چی رو برای «${target}» عوض کنم؟ (متن یا ویس بفرست)`);
+    return;
+  }
+
+  // card:ok
+  await advanceCard(bot, ctx, project, state.workDayId, cs.index);
 }
 
-/** نمایش گزارش نهایی به‌صورت متن + دکمه‌های تأیید/تغییر */
-async function showConfirm(ctx: Context, day: WorkDay) {
-  await setConfirm(ctx.chat!.id, day.id);
-  const kb = new InlineKeyboard()
-    .text("✅ تأیید نهایی", "confirm:yes")
-    .text("✏️ تغییر", "confirm:edit");
-  await ctx.reply(
-    "👆 گزارش نهایی این پروژه آماده‌ست. تأیید می‌کنی یا تغییری لازمه؟",
-    { reply_markup: kb },
-  );
-}
-
-/** نهایی‌سازی: نسخه‌ی جدید + اکسل + بستن روز */
-async function finalize(
+async function advanceCard(
   bot: Bot,
   ctx: Context,
   project: Project,
-  day: WorkDay,
+  workDayId: number,
+  index: number,
 ) {
+  await updateCardState(ctx.chat!.id, { index: index + 1, editTarget: null }, "cards");
+  await showCard(bot, ctx, project, workDayId, index + 1);
+}
+
+/** اعمال تغییرات جمع‌شده و ساخت گزارش نهایی */
+async function finalizeFromCards(
+  bot: Bot,
+  ctx: Context,
+  project: Project,
+  workDayId: number,
+) {
+  const state = await getConversationState(ctx.chat!.id);
+  const cs = state?.cardState;
+  await ctx.reply("⏳ در حال اعمال تغییرات و ساخت گزارش نهایی…");
+
+  if (cs && (cs.changes.length || cs.deletions.length)) {
+    await runExtraction(project.id, workDayId, {
+      changes: cs.changes,
+      deletions: cs.deletions,
+    });
+  }
+
+  const day = await getWorkDayById(workDayId);
+  if (!day) return;
+  await finalize(bot, ctx, project, day);
+}
+
+/** ساخت اکسل + بستن روز */
+async function finalize(bot: Bot, ctx: Context, project: Project, day: WorkDay) {
   const rev = await bumpRevision(day.id);
   const dayForReport: WorkDay = { ...day, revision: rev };
-  const finalSummary = await loadDaySummary(day.id);
+  const summary = await loadDaySummary(day.id);
 
-  const buffer = await buildDailyExcel(project, dayForReport, finalSummary);
+  await ctx.reply(formatDaySummary(dayForReport, summary));
+
+  const buffer = await buildDailyExcel(project, dayForReport, summary);
   const revTag = `-rev${String(rev).padStart(2, "0")}`;
   const safe = project.name.replace(/[^\p{L}\p{N}]+/gu, "_");
   const filename = `roznegar-${safe}-${day.jalaliDate.replace(/\//g, "-")}${revTag}.xlsx`;
@@ -468,10 +481,5 @@ async function finalize(
 
   await setDayStatus(day.id, "closed");
   await clearConversationState(ctx.chat!.id);
-  await ctx.reply("✅ گزارش نهایی ثبت شد.", { reply_markup: mainKeyboard() });
-}
-
-/** فهرست شماره‌دار فارسی */
-function numbered(items: string[]): string {
-  return items.map((q, i) => `${toFaDigits(i + 1)}. ${q}`).join("\n");
+  await ctx.reply("✅ گزارش نهایی ثبت شد.", { reply_markup: projectKeyboard() });
 }
